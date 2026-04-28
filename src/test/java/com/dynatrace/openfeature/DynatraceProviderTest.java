@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class DynatraceProviderTest {
 
-    private static final String TEST_KEY = "dt_server_us_testkey";
+    private static final String TEST_KEY = "dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53";
     private static final String FLAG_CONFIG = TestFixtures.FLAG_CONFIG;
 
     private MockWebServer server;
@@ -129,14 +129,18 @@ class DynatraceProviderTest {
 
     @Test
     void cdnUrlDerivedFromKey() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.builder("dt_server_us_abc123").build();
-        assertEquals("https://cdn.us.fm.dynatrace.com/server/dt_server_us_abc123.json", options.getCdnUrl());
+        DynatraceProviderOptions options =
+                DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+        assertEquals(
+                "https://cdn.us.fm.dynatrace.com/server/dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53.json",
+                options.getCdnUrl());
     }
 
     @Test
     void cdnUrlUsesGeoAndTypeFromKey() {
-        DynatraceProviderOptions eu = DynatraceProviderOptions.builder("dt_server_eu_abc123").build();
-        assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com"));
+        DynatraceProviderOptions eu =
+                DynatraceProviderOptions.builder("dt_web_eu_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+        assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com/web/"));
     }
 
     @Test
@@ -148,7 +152,65 @@ class DynatraceProviderTest {
 
     @Test
     void builderRejectsInvalidKeyFormat() {
-        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder("notavalidkey"));
-        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder("dt_server_us"));
+        // missing dt_ prefix
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("notavalidkey"));
+        // not enough segments
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_server_us"));
+    }
+
+    @Test
+    void builderRejectsInvalidType() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_unknown_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
+    }
+
+    @Test
+    void builderRejectsInvalidGeo() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_server_xx_03ee0ef7cd4244bfb8b71fea8f783f53"));
+    }
+
+    @Test
+    void builderRejectsInvalidIdLength() {
+        // too short
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_server_us_abc123"));
+        // too long
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53extra"));
+    }
+
+    @Test
+    void builderRejectsCdnBaseUrlWithoutTrailingSlash() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder(TEST_KEY).cdnBaseUrl("https://cdn.example.com/server"));
+    }
+
+    @Test
+    void builderRejectsBlankCdnBaseUrl() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder(TEST_KEY).cdnBaseUrl(""));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder(TEST_KEY).cdnBaseUrl(null));
+    }
+
+    @Test
+    void shutdownBeforeInitializeIsSafe() {
+        DynatraceProvider p = provider();
+        assertDoesNotThrow(p::shutdown);
+    }
+
+    @Test
+    void evaluationBeforeInitializeReturnsFlagNotFound() {
+        DynatraceProvider p = provider();
+        try {
+            ProviderEvaluation<Boolean> result =
+                    p.getBooleanEvaluation("any-flag", false, new ImmutableContext());
+            assertEquals(ErrorCode.FLAG_NOT_FOUND, result.getErrorCode());
+        } finally {
+            p.shutdown();
+        }
     }
 }

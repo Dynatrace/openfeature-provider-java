@@ -1,11 +1,17 @@
 package com.dynatrace.openfeature;
 
+import java.util.Set;
+
 /**
  * Configuration options for {@link DynatraceProvider}.
  *
  * <p>Build via {@link #builder(String)}.
  */
 public final class DynatraceProviderOptions {
+
+    static final Set<String> ALLOWED_TYPES = Set.of("server", "web", "mobile");
+    static final Set<String> ALLOWED_GEOS = Set.of("us", "eu", "oc", "apac");
+    static final int ID_LENGTH = 32;
 
     private final String key;
     private final String geo;
@@ -55,23 +61,44 @@ public final class DynatraceProviderOptions {
             }
             // format: dt_{type}_{geo}_{id}
             String[] parts = key.split("_", 4);
-            if (parts.length != 4 || !parts[0].equals("dt")) {
+            if (parts.length != 4 || !"dt".equals(parts[0])) {
                 throw new IllegalArgumentException(
                         "invalid key format; expected dt_{type}_{geo}_{id}, got: " + key);
             }
+            String parsedType = parts[1];
+            String parsedGeo = parts[2];
+            String parsedId = parts[3];
+
+            if (!ALLOWED_TYPES.contains(parsedType)) {
+                throw new IllegalArgumentException(
+                        "invalid key type '" + parsedType + "'; expected one of " + ALLOWED_TYPES);
+            }
+            if (!ALLOWED_GEOS.contains(parsedGeo)) {
+                throw new IllegalArgumentException(
+                        "invalid key geo '" + parsedGeo + "'; expected one of " + ALLOWED_GEOS);
+            }
+            if (parsedId.length() != ID_LENGTH) {
+                throw new IllegalArgumentException(
+                        "invalid key id '" + parsedId + "'; expected " + ID_LENGTH + " characters");
+            }
+
             this.key = key;
-            this.type = parts[1];
-            this.geo = parts[2];
+            this.type = parsedType;
+            this.geo = parsedGeo;
         }
 
         /**
-         * Override the CDN base URL (include trailing slash).
+         * Override the CDN base URL (must end with {@code /}).
          * For dev/labs environments (e.g. {@code https://cdn.us.fm.dynatracelabs.com/server/}).
          * Production URL is derived automatically from the key.
          */
         public Builder cdnBaseUrl(String cdnBaseUrl) {
             if (cdnBaseUrl == null || cdnBaseUrl.isBlank()) {
                 throw new IllegalArgumentException("cdnBaseUrl must not be null or blank");
+            }
+            if (!cdnBaseUrl.endsWith("/")) {
+                throw new IllegalArgumentException(
+                        "cdnBaseUrl must end with '/' (got: " + cdnBaseUrl + ")");
             }
             this.cdnBaseUrlOverride = cdnBaseUrl;
             return this;
