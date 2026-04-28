@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class DynatraceProviderTest {
 
-    private static final String TEST_KEY = "testkey";
+    private static final String TEST_KEY = "dt_server_us_testkey";
     private static final String FLAG_CONFIG = TestFixtures.FLAG_CONFIG;
 
     private MockWebServer server;
@@ -37,7 +37,7 @@ class DynatraceProviderTest {
 
     private DynatraceProvider provider() {
         DynatraceProviderOptions options = DynatraceProviderOptions.builder(TEST_KEY)
-                .cdnBaseUrl(server.url("/server/").toString())
+                .cdnBaseUrl(server.url("/server/").toString()) // dev override; points to MockWebServer
                 .build();
         return new DynatraceProvider(options, new FlagdCore(), httpClient);
     }
@@ -128,20 +128,15 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void cdnUrlConstructedCorrectly() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.builder("mykey")
-                .cdnBaseUrl("https://cdn.us.fm.dynatrace.com/server/")
-                .build();
-        assertEquals(
-                "https://cdn.us.fm.dynatrace.com/server/server_dt_server_mykey.json",
-                options.getCdnUrl());
+    void cdnUrlDerivedFromKey() {
+        DynatraceProviderOptions options = DynatraceProviderOptions.builder("dt_server_us_abc123").build();
+        assertEquals("https://cdn.us.fm.dynatrace.com/server/dt_server_us_abc123.json", options.getCdnUrl());
     }
 
     @Test
-    void defaultCdnUrlUsesProductionDomain() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.builder("mykey").build();
-        assertTrue(options.getCdnUrl().startsWith("https://cdn.us.fm.dynatrace.com/server/"),
-                "default URL should use dynatrace.com, not dynatracelabs.com");
+    void cdnUrlUsesGeoAndTypeFromKey() {
+        DynatraceProviderOptions eu = DynatraceProviderOptions.builder("dt_server_eu_abc123").build();
+        assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com"));
     }
 
     @Test
@@ -152,8 +147,8 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void builderRejectsBlankCdnBaseUrl() {
-        assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("key").cdnBaseUrl("").build());
+    void builderRejectsInvalidKeyFormat() {
+        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder("notavalidkey"));
+        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder("dt_server_us"));
     }
 }

@@ -25,8 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Usage:
  * <pre>{@code
- * DynatraceProviderOptions options = DynatraceProviderOptions.builder("de848e97a9cc4cc78aae568e65f49a9d")
- *     .cdnBaseUrl("https://cdn.us.fm.dynatracelabs.com/server/")  // optional; omit for prod
+ * DynatraceProviderOptions options = DynatraceProviderOptions.builder("dt_server_us_de848e97a9cc4cc78aae568e65f49a9d")
  *     .build();
  *
  * OpenFeatureAPI.getInstance().setProvider(new DynatraceProvider(options));
