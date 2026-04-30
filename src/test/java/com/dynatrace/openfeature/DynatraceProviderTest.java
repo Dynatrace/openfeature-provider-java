@@ -137,10 +137,25 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void cdnUrlUsesGeoAndTypeFromKey() {
+    void cdnUrlUsesGeoFromKey() {
         DynatraceProviderOptions eu =
-                DynatraceProviderOptions.builder("dt_web_eu_03ee0ef7cd4244bfb8b71fea8f783f53").build();
-        assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com/web/"));
+                DynatraceProviderOptions.builder("dt_server_eu_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+        assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com/server/"));
+    }
+
+    @Test
+    void builderAcceptsArbitraryAlphabeticGeo() {
+        // any alphabetic geo is accepted (e.g. de, oc, apac)
+        DynatraceProviderOptions de =
+                DynatraceProviderOptions.builder("dt_server_de_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+        assertTrue(de.getCdnUrl().contains("cdn.de.fm.dynatrace.com"));
+    }
+
+    @Test
+    void builderTrimsWhitespaceFromKey() {
+        DynatraceProviderOptions options = DynatraceProviderOptions
+                .builder("  dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53  ").build();
+        assertEquals("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53", options.getKey());
     }
 
     @Test
@@ -161,15 +176,25 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void builderRejectsInvalidType() {
+    void builderRejectsNonServerType() {
+        // this is a server-side provider; reject web and mobile keys
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_web_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_mobile_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("dt_unknown_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
     }
 
     @Test
-    void builderRejectsInvalidGeo() {
+    void builderRejectsNonAlphabeticGeo() {
+        // dashes, dots, and digits are rejected
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_xx_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                DynatraceProviderOptions.builder("dt_server_us-east_03ee0ef7cd4244bfb8b71fea8f783f53"));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_server_x.y_03ee0ef7cd4244bfb8b71fea8f783f53"));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt_server_us2_03ee0ef7cd4244bfb8b71fea8f783f53"));
     }
 
     @Test
@@ -183,9 +208,13 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void builderRejectsCdnBaseUrlWithoutTrailingSlash() {
-        assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(TEST_KEY).cdnBaseUrl("https://cdn.example.com/server"));
+    void cdnBaseUrlWithoutTrailingSlashIsAutoAppended() {
+        DynatraceProviderOptions options = DynatraceProviderOptions.builder(TEST_KEY)
+                .cdnBaseUrl("https://cdn.example.com/server")
+                .build();
+        assertEquals(
+                "https://cdn.example.com/server/dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53.json",
+                options.getCdnUrl());
     }
 
     @Test

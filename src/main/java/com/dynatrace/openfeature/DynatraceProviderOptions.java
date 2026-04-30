@@ -1,6 +1,7 @@
 package com.dynatrace.openfeature;
 
-import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Configuration options for {@link DynatraceProvider}.
@@ -9,9 +10,8 @@ import java.util.Set;
  */
 public final class DynatraceProviderOptions {
 
-    static final Set<String> ALLOWED_TYPES = Set.of("server", "web", "mobile");
-    static final Set<String> ALLOWED_GEOS = Set.of("us", "eu", "oc", "apac");
-    static final int ID_LENGTH = 32;
+    /** SDK key format: dt_server_{geo}_{32-char id}; geo is alphabetic. */
+    static final Pattern KEY_PATTERN = Pattern.compile("^dt_(server)_([a-zA-Z]+)_([a-zA-Z0-9]{32})$");
 
     private final String key;
     private final String geo;
@@ -26,7 +26,7 @@ public final class DynatraceProviderOptions {
     }
 
     /**
-     * The SDK key; format {@code dt_{type}_{geo}_{id}} (e.g. {@code dt_server_us_de848e97...}).
+     * The SDK key; format {@code dt_server_{geo}_{id}} (e.g. {@code dt_server_us_de848e97...}).
      */
     public String getKey() {
         return key;
@@ -41,7 +41,7 @@ public final class DynatraceProviderOptions {
     }
 
     /**
-     * @param key SDK key in the format {@code dt_{type}_{geo}_{id}}
+     * @param key SDK key in the format {@code dt_server_{geo}_{id}}
      *            (e.g. {@code dt_server_us_de848e97a9cc4cc78aae568e65f49a9d})
      */
     public static Builder builder(String key) {
@@ -59,36 +59,19 @@ public final class DynatraceProviderOptions {
             if (key == null || key.isBlank()) {
                 throw new IllegalArgumentException("key must not be null or blank");
             }
-            // format: dt_{type}_{geo}_{id}
-            String[] parts = key.split("_", 4);
-            if (parts.length != 4 || !"dt".equals(parts[0])) {
+            String trimmed = key.strip();
+            Matcher m = KEY_PATTERN.matcher(trimmed);
+            if (!m.matches()) {
                 throw new IllegalArgumentException(
-                        "invalid key format; expected dt_{type}_{geo}_{id}, got: " + key);
+                        "invalid key '" + trimmed + "'; expected dt_server_{geo}_{32-char id}");
             }
-            String parsedType = parts[1];
-            String parsedGeo = parts[2];
-            String parsedId = parts[3];
-
-            if (!ALLOWED_TYPES.contains(parsedType)) {
-                throw new IllegalArgumentException(
-                        "invalid key type '" + parsedType + "'; expected one of " + ALLOWED_TYPES);
-            }
-            if (!ALLOWED_GEOS.contains(parsedGeo)) {
-                throw new IllegalArgumentException(
-                        "invalid key geo '" + parsedGeo + "'; expected one of " + ALLOWED_GEOS);
-            }
-            if (parsedId.length() != ID_LENGTH) {
-                throw new IllegalArgumentException(
-                        "invalid key id '" + parsedId + "'; expected " + ID_LENGTH + " characters");
-            }
-
-            this.key = key;
-            this.type = parsedType;
-            this.geo = parsedGeo;
+            this.key = trimmed;
+            this.type = m.group(1);
+            this.geo = m.group(2);
         }
 
         /**
-         * Override the CDN base URL (must end with {@code /}).
+         * Override the CDN base URL. A trailing {@code /} is auto-appended if missing.
          * For dev/labs environments (e.g. {@code https://cdn.us.fm.dynatracelabs.com/server/}).
          * Production URL is derived automatically from the key.
          */
@@ -96,11 +79,7 @@ public final class DynatraceProviderOptions {
             if (cdnBaseUrl == null || cdnBaseUrl.isBlank()) {
                 throw new IllegalArgumentException("cdnBaseUrl must not be null or blank");
             }
-            if (!cdnBaseUrl.endsWith("/")) {
-                throw new IllegalArgumentException(
-                        "cdnBaseUrl must end with '/' (got: " + cdnBaseUrl + ")");
-            }
-            this.cdnBaseUrlOverride = cdnBaseUrl;
+            this.cdnBaseUrlOverride = cdnBaseUrl.endsWith("/") ? cdnBaseUrl : cdnBaseUrl + "/";
             return this;
         }
 
