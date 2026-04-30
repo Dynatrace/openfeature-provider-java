@@ -10,8 +10,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.ZonedDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -34,12 +36,14 @@ public final class CdnFetcher {
     static final String HEADER_LAST_MODIFIED = "Last-Modified";
     static final String HEADER_IF_MODIFIED_SINCE = "If-Modified-Since";
 
+    /** RFC 7231 IMF-fixdate canonical form (always GMT, two-digit day). */
+    private static final DateTimeFormatter HEADER_DATE_FORMATTER =
+            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ENGLISH);
+
     private final URI url;
     private final HttpClient httpClient;
 
-    private final AtomicReference<String> lastEtag = new AtomicReference<>(null);
-    private final AtomicReference<String> lastModifiedHeader = new AtomicReference<>(null);
-    private final AtomicReference<ZonedDateTime> lastModifiedAt = new AtomicReference<>(null);
+    private final AtomicReference<RevalidationState> state = new AtomicReference<>(RevalidationState.EMPTY);
 
     public CdnFetcher(String url, HttpClient httpClient) {
         this.url = URI.create(url);
@@ -55,19 +59,19 @@ public final class CdnFetcher {
      * @throws IOException on network failure
      */
     public FetchResult fetch() throws IOException {
-        String etag = lastEtag.get();
-        String ifModifiedSince = lastModifiedHeader.get();
+        RevalidationState current = state.get();
+        String currentLastModifiedHeader = toHeaderDate(current.lastModifiedAt);
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(url)
                 .GET()
                 .timeout(Duration.ofSeconds(10));
 
-        if (etag != null) {
-            requestBuilder.header(HEADER_IF_NONE_MATCH, etag);
+        if (current.etag != null) {
+            requestBuilder.header(HEADER_IF_NONE_MATCH, current.etag);
         }
-        if (ifModifiedSince != null) {
-            requestBuilder.header(HEADER_IF_MODIFIED_SINCE, ifModifiedSince);
+        if (currentLastModifiedHeader != null) {
+            requestBuilder.header(HEADER_IF_MODIFIED_SINCE, currentLastModifiedHeader);
         }
 
         HttpResponse<String> response;
@@ -81,7 +85,7 @@ public final class CdnFetcher {
         int statusCode = response.statusCode();
 
         if (statusCode == 304) {
-            return new FetchResult(304, null, etag, ifModifiedSince);
+            return new FetchResult(304, null, current.etag, currentLastModifiedHeader);
         }
 
         String newEtag = response.headers().firstValue(HEADER_ETAG).orElse(null);
@@ -91,31 +95,25 @@ public final class CdnFetcher {
         if (statusCode >= 200 && statusCode < 300) {
             // stale CDN node defense: reject 200 if Last-Modified isn't newer (CF nodes can serve old).
             // missing Last-Modified: accept (no header = no check).
-            ZonedDateTime newLastModifiedAt = parseHttpDate(newLastModified);
-            ZonedDateTime stored = lastModifiedAt.get();
-            if (newLastModifiedAt != null && stored != null && !newLastModifiedAt.isAfter(stored)) {
+            ZonedDateTime newLastModifiedAt = fromHeaderDate(newLastModified);
+            if (newLastModifiedAt != null
+                    && current.lastModifiedAt != null
+                    && !newLastModifiedAt.isAfter(current.lastModifiedAt)) {
                 log.warn("CDN returned 200 but Last-Modified ({}) is not later than stored ({}); "
                                 + "treating as 304 (suspected stale node)",
-                        newLastModified, lastModifiedHeader.get());
-                return new FetchResult(304, null, etag, lastModifiedHeader.get());
+                        newLastModified, currentLastModifiedHeader);
+                return new FetchResult(304, null, current.etag, currentLastModifiedHeader);
             }
 
-            if (newEtag != null) {
-                lastEtag.set(newEtag);
-            }
-            if (newLastModified != null) {
-                lastModifiedHeader.set(newLastModified);
-                if (newLastModifiedAt != null) {
-                    lastModifiedAt.set(newLastModifiedAt);
-                }
-            }
+            // store only what this response gave us; never mix tokens across requests.
+            state.set(new RevalidationState(newEtag, newLastModifiedAt));
         }
 
         return new FetchResult(statusCode, body, newEtag, newLastModified);
     }
 
-    /** Parses an HTTP-date (RFC 7231 IMF-fixdate, always GMT). Returns null on parse failure. */
-    private static ZonedDateTime parseHttpDate(String value) {
+    
+    private static ZonedDateTime fromHeaderDate(String value) {
         if (value == null) {
             return null;
         }
@@ -124,6 +122,23 @@ public final class CdnFetcher {
         } catch (DateTimeParseException e) {
             log.warn("unparseable HTTP-date '{}': {}", value, e.getMessage());
             return null;
+        }
+    }
+
+    /** Formats a {@link ZonedDateTime} as canonical IMF-fixdate (RFC 7231). Null-safe. */
+    private static String toHeaderDate(ZonedDateTime value) {
+        return value == null ? null : HEADER_DATE_FORMATTER.format(value.withZoneSameInstant(ZoneOffset.UTC));
+    }
+
+    private static final class RevalidationState {
+        static final RevalidationState EMPTY = new RevalidationState(null, null);
+
+        final String etag;
+        final ZonedDateTime lastModifiedAt;
+
+        RevalidationState(String etag, ZonedDateTime lastModifiedAt) {
+            this.etag = etag;
+            this.lastModifiedAt = lastModifiedAt;
         }
     }
 }
