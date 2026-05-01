@@ -58,7 +58,7 @@ public final class CdnFetcher {
      *         as if the CDN had returned 304)
      * @throws IOException on network failure
      */
-    public FetchResult fetch() throws IOException {
+    public synchronized FetchResult fetch() throws IOException {
         RevalidationState current = state.get();
         String currentLastModifiedHeader = toHeaderDate(current.lastModifiedAt);
 
@@ -105,7 +105,7 @@ public final class CdnFetcher {
                 return new FetchResult(304, null, current.etag, currentLastModifiedHeader);
             }
 
-            // store only what this response gave us; never mix tokens across requests.
+            // store only what this response gave us; never mix tokens across requests
             state.set(new RevalidationState(newEtag, newLastModifiedAt));
         }
 

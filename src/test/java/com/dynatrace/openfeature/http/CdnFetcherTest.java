@@ -138,6 +138,30 @@ class CdnFetcherTest {
     }
 
     @Test
+    void equalLastModifiedIsTreatedAsNotModified() throws IOException {
+        // first fetch establishes baseline
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody(MINIMAL_FLAGS_BODY)
+                .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG)
+                .addHeader(CdnFetcher.HEADER_LAST_MODIFIED, LAST_MODIFIED_OLD));
+        // second fetch: CDN node returns 200 with the same Last-Modified (cached copy)
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("possibly-stale-body")
+                .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG)
+                .addHeader(CdnFetcher.HEADER_LAST_MODIFIED, LAST_MODIFIED_OLD));
+
+        CdnFetcher fetcher = fetcher();
+        fetcher.fetch();
+        FetchResult result = fetcher.fetch();
+
+        // !isAfter() rejects equality; equal Last-Modified treated as 304
+        assertTrue(result.isNotModified());
+        assertNull(result.getBody());
+    }
+
+    @Test
     void responseMissingLastModifiedIsAccepted() throws IOException {
         // first fetch establishes Last-Modified
         server.enqueue(new MockResponse()

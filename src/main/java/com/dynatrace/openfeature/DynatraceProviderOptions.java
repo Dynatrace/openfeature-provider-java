@@ -53,7 +53,7 @@ public final class DynatraceProviderOptions {
         private final String key;
         private final String geo;
         private final String type;
-        String cdnBaseUrlOverride = null; // package-private; for dev/testing only
+        String cdnBaseUrlOverride = null;
 
         private Builder(String key) {
             if (key == null || key.isBlank()) {
