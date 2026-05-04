@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
-import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -133,7 +132,6 @@ public final class DynatraceProvider extends EventProvider {
 
     private static HttpClient buildDefaultHttpClient() {
         return HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }
 }

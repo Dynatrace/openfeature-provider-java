@@ -14,7 +14,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Fetches flag configuration JSON from the CDN.
@@ -40,10 +39,14 @@ public final class CdnFetcher {
     private static final DateTimeFormatter HEADER_DATE_FORMATTER =
             DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ENGLISH);
 
+    /** must be less than the minimum poll interval (10s) to avoid overlapping requests */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
+
     private final URI url;
     private final HttpClient httpClient;
 
-    private final AtomicReference<RevalidationState> state = new AtomicReference<>(RevalidationState.EMPTY);
+    // mutated only in synchronized fetch(); if that changes, use AtomicReference or equivalent
+    private CacheState state = CacheState.EMPTY;
 
     public CdnFetcher(String url, HttpClient httpClient) {
         this.url = URI.create(url);
@@ -59,13 +62,13 @@ public final class CdnFetcher {
      * @throws IOException on network failure
      */
     public synchronized FetchResult fetch() throws IOException {
-        RevalidationState current = state.get();
+        CacheState current = state;
         String currentLastModifiedHeader = toHeaderDate(current.lastModifiedAt);
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(url)
                 .GET()
-                .timeout(Duration.ofSeconds(10));
+                .timeout(REQUEST_TIMEOUT);
 
         if (current.etag != null) {
             requestBuilder.header(HEADER_IF_NONE_MATCH, current.etag);
@@ -106,7 +109,7 @@ public final class CdnFetcher {
             }
 
             // store only what this response gave us; never mix tokens across requests
-            state.set(new RevalidationState(newEtag, newLastModifiedAt));
+            state = new CacheState(newEtag, newLastModifiedAt);
         }
 
         return new FetchResult(statusCode, body, newEtag, newLastModified);
@@ -130,13 +133,13 @@ public final class CdnFetcher {
         return value == null ? null : HEADER_DATE_FORMATTER.format(value.withZoneSameInstant(ZoneOffset.UTC));
     }
 
-    private static final class RevalidationState {
-        static final RevalidationState EMPTY = new RevalidationState(null, null);
+    private static final class CacheState {
+        static final CacheState EMPTY = new CacheState(null, null);
 
         final String etag;
         final ZonedDateTime lastModifiedAt;
 
-        RevalidationState(String etag, ZonedDateTime lastModifiedAt) {
+        CacheState(String etag, ZonedDateTime lastModifiedAt) {
             this.etag = etag;
             this.lastModifiedAt = lastModifiedAt;
         }
