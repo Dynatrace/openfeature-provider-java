@@ -1,0 +1,14 @@
+{
+  "flags": {
+    "my-bool-flag": {
+      "state": "ENABLED",
+      "defaultVariant": "on",
+      "variants": { "on": true, "off": false }
+    },
+    "my-string-flag": {
+      "state": "ENABLED",
+      "defaultVariant": "hello",
+      "variants": { "hello": "world" }
+    }
+  }
+}
