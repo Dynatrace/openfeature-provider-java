@@ -1,6 +1,5 @@
-package com.dynatrace.openfeature.http;
+package com.dynatrace.openfeature;
 
-import com.dynatrace.openfeature.TestFixtures;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -10,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -22,6 +22,10 @@ class CdnFetcherTest {
 
     private MockWebServer server;
     private HttpClient httpClient;
+
+    /** no-sleep retry strategy for fast tests */
+    private static final RetryStrategy NO_DELAY_RETRY =
+            new RetryStrategy(new Random(42), ms -> {});
 
     @BeforeEach
     void setUp() throws IOException {
@@ -36,7 +40,7 @@ class CdnFetcherTest {
     }
 
     private CdnFetcher fetcher() {
-        return new CdnFetcher(server.url("/flags.json").toString(), httpClient);
+        return new CdnFetcher(server.url("/flags.json").toString(), httpClient, NO_DELAY_RETRY);
     }
 
     @Test
@@ -104,24 +108,85 @@ class CdnFetcherTest {
     }
 
     @Test
-    void serverErrorReturnsStatus() throws IOException {
-        server.enqueue(new MockResponse().setResponseCode(503));
+    void serverErrorIsRetriedAndReturnsLastStatus() throws IOException {
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
 
         FetchResult result = fetcher().fetch();
 
         assertEquals(503, result.getStatusCode());
         assertFalse(result.isSuccess());
+        assertEquals(RetryStrategy.MAX_ATTEMPTS, server.getRequestCount());
+    }
+
+    @Test
+    void serverErrorRecoveryOnRetry() throws IOException {
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody(MINIMAL_FLAGS_BODY)
+                .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG));
+
+        FetchResult result = fetcher().fetch();
+
+        assertTrue(result.isSuccess());
+        assertEquals(3, server.getRequestCount());
+    }
+
+    @Test
+    void rateLimitedReturns429WithoutNetworkCall() throws IOException {
+        server.enqueue(new MockResponse()
+                .setResponseCode(429)
+                .addHeader(CdnFetcher.HEADER_RETRY_AFTER, "60"));
+
+        CdnFetcher fetcher = fetcher();
+        FetchResult first = fetcher.fetch();
+        assertEquals(429, first.getStatusCode());
+        assertTrue(fetcher.isRateLimited());
+
+        FetchResult second = fetcher.fetch();
+        assertEquals(429, second.getStatusCode());
+        assertEquals(1, server.getRequestCount());
+    }
+
+    @Test
+    void fourTwentyNineIsNotRetried() throws IOException {
+        server.enqueue(new MockResponse()
+                .setResponseCode(429)
+                .addHeader(CdnFetcher.HEADER_RETRY_AFTER, "30"));
+
+        fetcher().fetch();
+
+        assertEquals(1, server.getRequestCount());
+    }
+
+    @Test
+    void parseRetryAfterSeconds() {
+        assertEquals(30_000L, CdnFetcher.parseRetryAfterMs("30"));
+        assertEquals(120_000L, CdnFetcher.parseRetryAfterMs("120"));
+    }
+
+    @Test
+    void parseRetryAfterMissingDefaultsTo60s() {
+        assertEquals(60_000L, CdnFetcher.parseRetryAfterMs(null));
+        assertEquals(60_000L, CdnFetcher.parseRetryAfterMs(""));
+        assertEquals(60_000L, CdnFetcher.parseRetryAfterMs("   "));
+    }
+
+    @Test
+    void parseRetryAfterInvalidDefaultsTo60s() {
+        assertEquals(60_000L, CdnFetcher.parseRetryAfterMs("not-a-number-or-date"));
     }
 
     @Test
     void staleNodeWithOlderLastModifiedIsTreatedAsNotModified() throws IOException {
-        // first fetch: establishes baseline with the newer Last-Modified
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody(MINIMAL_FLAGS_BODY)
                 .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG)
                 .addHeader(CdnFetcher.HEADER_LAST_MODIFIED, LAST_MODIFIED_NEW));
-        // second fetch: a stale CDN node returns 200 with an older Last-Modified
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody("stale-body")
@@ -132,20 +197,17 @@ class CdnFetcherTest {
         fetcher.fetch();
         FetchResult result = fetcher.fetch();
 
-        // we should reject the stale response and surface it as not-modified
         assertTrue(result.isNotModified());
         assertNull(result.getBody());
     }
 
     @Test
     void equalLastModifiedIsTreatedAsNotModified() throws IOException {
-        // first fetch establishes baseline
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody(MINIMAL_FLAGS_BODY)
                 .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG)
                 .addHeader(CdnFetcher.HEADER_LAST_MODIFIED, LAST_MODIFIED_OLD));
-        // second fetch: CDN node returns 200 with the same Last-Modified (cached copy)
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody("possibly-stale-body")
@@ -156,20 +218,17 @@ class CdnFetcherTest {
         fetcher.fetch();
         FetchResult result = fetcher.fetch();
 
-        // !isAfter() rejects equality; equal Last-Modified treated as 304
         assertTrue(result.isNotModified());
         assertNull(result.getBody());
     }
 
     @Test
     void responseMissingLastModifiedIsAccepted() throws IOException {
-        // first fetch establishes Last-Modified
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody(MINIMAL_FLAGS_BODY)
                 .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG)
                 .addHeader(CdnFetcher.HEADER_LAST_MODIFIED, LAST_MODIFIED_OLD));
-        // second fetch returns 200 with no Last-Modified at all
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
                 .setBody("new-body")
@@ -179,7 +238,6 @@ class CdnFetcherTest {
         fetcher.fetch();
         FetchResult result = fetcher.fetch();
 
-        // we accept the response when Last-Modified is absent (can't apply staleness check)
         assertTrue(result.isSuccess());
         assertEquals("new-body", result.getBody());
     }
