@@ -1,4 +1,4 @@
-package com.dynatrace.openfeature.http;
+package com.dynatrace.openfeature;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,11 +9,14 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Fetches flag configuration JSON from the CDN.
@@ -24,9 +27,11 @@ import java.util.Locale;
  *   <li>Last-Modified / If-Modified-Since revalidation; defends against stale CDN nodes
  *       by rejecting 200 responses whose {@code Last-Modified} is not strictly later than
  *       the previously stored value.</li>
+ *   <li>Retry with exponential backoff on 5xx / network errors (via {@link RetryStrategy})</li>
+ *   <li>429 / Retry-After rate limiting</li>
  * </ul>
  */
-public final class CdnFetcher {
+final class CdnFetcher {
 
     private static final Logger log = LoggerFactory.getLogger(CdnFetcher.class);
 
@@ -34,6 +39,7 @@ public final class CdnFetcher {
     static final String HEADER_IF_NONE_MATCH = "If-None-Match";
     static final String HEADER_LAST_MODIFIED = "Last-Modified";
     static final String HEADER_IF_MODIFIED_SINCE = "If-Modified-Since";
+    static final String HEADER_RETRY_AFTER = "Retry-After";
 
     /** RFC 7231 IMF-fixdate canonical form (always GMT, two-digit day). */
     private static final DateTimeFormatter HEADER_DATE_FORMATTER =
@@ -42,26 +48,65 @@ public final class CdnFetcher {
     /** must be less than the minimum poll interval (10s) to avoid overlapping requests */
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
+    /** default Retry-After duration when 429 has no header */
+    private static final long DEFAULT_RETRY_AFTER_MS = 60_000L;
+
     private final URI url;
     private final HttpClient httpClient;
+    private final RetryStrategy retryStrategy;
 
-    // mutated only in synchronized fetch(); if that changes, use AtomicReference or equivalent
+    // mutated only in doFetch(); guarded by fetchLock
     private CacheState state = CacheState.EMPTY;
 
-    public CdnFetcher(String url, HttpClient httpClient) {
+    // rate limit tracking; read outside the lock by isRateLimited()
+    private final AtomicLong rateLimitedUntil = new AtomicLong(0);
+
+    private final ReentrantLock fetchLock = new ReentrantLock();
+
+    CdnFetcher(String url, HttpClient httpClient) {
+        this(url, httpClient, new RetryStrategy());
+    }
+
+    // visible for testing
+    CdnFetcher(String url, HttpClient httpClient, RetryStrategy retryStrategy) {
         this.url = URI.create(url);
         this.httpClient = httpClient;
+        this.retryStrategy = retryStrategy;
+    }
+
+    /** Returns true if a 429 Retry-After period is still active. */
+    boolean isRateLimited() {
+        return System.currentTimeMillis() < rateLimitedUntil.get();
     }
 
     /**
-     * Fetches the flag configuration from the CDN.
+     * Fetches the flag configuration from the CDN with retry.
      *
-     * @return {@link FetchResult}; body is null on 304 or on a stale-node response
-     *         (where {@code Last-Modified} is not later than the stored value, treated
-     *         as if the CDN had returned 304)
-     * @throws IOException on network failure
+     * <p>If currently rate-limited (429), returns a 429 {@link FetchResult} immediately
+     * without making a network request.
+     *
+     * <p>Uses {@code tryLock} so that overlapping calls are skipped rather than queued.
+     *
+     * @return {@link FetchResult}; body is null on 304, 429, or on a stale-node response
+     * @throws IOException on network failure after all retry attempts exhausted
      */
-    public synchronized FetchResult fetch() throws IOException {
+    FetchResult fetch() throws IOException {
+        if (isRateLimited()) {
+            log.debug("rate limited; skipping fetch");
+            return new FetchResult(429, null, null, null);
+        }
+        if (!fetchLock.tryLock()) {
+            log.debug("fetch already in progress; skipping");
+            return new FetchResult(304, null, null, null);
+        }
+        try {
+            return retryStrategy.execute(this::doFetch);
+        } finally {
+            fetchLock.unlock();
+        }
+    }
+
+    private FetchResult doFetch() throws IOException {
         CacheState current = state;
         String currentLastModifiedHeader = toHeaderDate(current.lastModifiedAt);
 
@@ -91,6 +136,14 @@ public final class CdnFetcher {
             return new FetchResult(304, null, current.etag, currentLastModifiedHeader);
         }
 
+        if (statusCode == 429) {
+            String retryAfter = response.headers().firstValue(HEADER_RETRY_AFTER).orElse(null);
+            long retryAfterMs = parseRetryAfterMs(retryAfter);
+            rateLimitedUntil.set(System.currentTimeMillis() + retryAfterMs);
+            log.warn("rate limited (429); pausing fetches for {}ms", retryAfterMs);
+            return new FetchResult(429, null, null, null);
+        }
+
         String newEtag = response.headers().firstValue(HEADER_ETAG).orElse(null);
         String newLastModified = response.headers().firstValue(HEADER_LAST_MODIFIED).orElse(null);
         String body = response.body();
@@ -115,7 +168,28 @@ public final class CdnFetcher {
         return new FetchResult(statusCode, body, newEtag, newLastModified);
     }
 
-    
+    /**
+     * Parses the Retry-After header value as either seconds or an HTTP-date.
+     * Returns milliseconds to wait. Falls back to {@link #DEFAULT_RETRY_AFTER_MS}.
+     */
+    static long parseRetryAfterMs(String retryAfter) {
+        if (retryAfter == null || retryAfter.isBlank()) {
+            return DEFAULT_RETRY_AFTER_MS;
+        }
+        // try as seconds
+        try {
+            return Long.parseLong(retryAfter.trim()) * 1000L;
+        } catch (NumberFormatException ignored) {
+        }
+        // try as HTTP-date
+        try {
+            Instant retryAt = Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(retryAfter.trim()));
+            return Math.max(retryAt.toEpochMilli() - System.currentTimeMillis(), 0L);
+        } catch (DateTimeParseException ignored) {
+        }
+        return DEFAULT_RETRY_AFTER_MS;
+    }
+
     private static ZonedDateTime fromHeaderDate(String value) {
         if (value == null) {
             return null;

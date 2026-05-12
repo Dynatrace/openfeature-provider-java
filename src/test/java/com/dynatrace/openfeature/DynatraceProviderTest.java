@@ -4,6 +4,7 @@ import dev.openfeature.contrib.tools.flagd.core.FlagdCore;
 import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.ImmutableContext;
 import dev.openfeature.sdk.ProviderEvaluation;
+import dev.openfeature.sdk.ProviderState;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import org.junit.jupiter.api.AfterEach;
@@ -12,6 +13,8 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.time.Duration;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -22,6 +25,10 @@ class DynatraceProviderTest {
 
     private MockWebServer server;
     private HttpClient httpClient;
+
+    /** no-sleep retry strategy for fast tests */
+    private static final RetryStrategy NO_DELAY_RETRY =
+            new RetryStrategy(new Random(42), ms -> {});
 
     @BeforeEach
     void setUp() throws IOException {
@@ -35,17 +42,33 @@ class DynatraceProviderTest {
         server.shutdown();
     }
 
-    private DynatraceProvider provider() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.builder(TEST_KEY)
-                .cdnBaseUrl(server.url("/server/").toString()) // dev override; points to MockWebServer
+    private DynatraceProviderOptions options() {
+        return DynatraceProviderOptions.builder(TEST_KEY)
+                .cdnBaseUrl(server.url("/server/").toString())
                 .build();
-        return new DynatraceProvider(options, new FlagdCore(), httpClient);
+    }
+
+    private DynatraceProvider provider() {
+        DynatraceProviderOptions opts = options();
+        CdnFetcher fetcher = new CdnFetcher(opts.getCdnUrl(), httpClient, NO_DELAY_RETRY);
+        return new DynatraceProvider(opts, new FlagdCore(), fetcher);
+    }
+
+    /** provider with short poll interval and grace period for state management tests */
+    private DynatraceProvider fastProvider() {
+        return fastProvider(Duration.ofMillis(200));
+    }
+
+    private DynatraceProvider fastProvider(Duration gracePeriod) {
+        DynatraceProviderOptions opts = options();
+        CdnFetcher fetcher = new CdnFetcher(opts.getCdnUrl(), httpClient, NO_DELAY_RETRY);
+        return new DynatraceProvider(opts, new FlagdCore(), fetcher,
+                Duration.ofMillis(50), gracePeriod);
     }
 
     @Test
     void providerNameIsDynatrace() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.builder(TEST_KEY).build();
-        DynatraceProvider p = new DynatraceProvider(options, new FlagdCore(), httpClient);
+        DynatraceProvider p = provider();
         assertEquals("dynatrace", p.getMetadata().getName());
         p.shutdown();
     }
@@ -71,7 +94,9 @@ class DynatraceProviderTest {
 
     @Test
     void initializeThrowsOnHttpError() {
-        server.enqueue(new MockResponse().setResponseCode(503));
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
 
         DynatraceProvider p = provider();
 
@@ -106,7 +131,6 @@ class DynatraceProviderTest {
         DynatraceProvider p = provider();
         p.initialize(new ImmutableContext());
 
-        // the provider returns FLAG_NOT_FOUND; the SDK (not the provider) applies the default value
         ProviderEvaluation<Boolean> result = p.getBooleanEvaluation("no-such-flag", false, new ImmutableContext());
         assertEquals(ErrorCode.FLAG_NOT_FOUND, result.getErrorCode());
 
@@ -127,6 +151,100 @@ class DynatraceProviderTest {
         });
     }
 
+    // -- state management tests --
+
+    @Test
+    void stateIsReadyAfterInitialize() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+
+        DynatraceProvider p = provider();
+        p.initialize(new ImmutableContext());
+
+        assertEquals(ProviderState.READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void stateIsNotReadyBeforeInitialize() {
+        DynatraceProvider p = provider();
+        assertEquals(ProviderState.NOT_READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void pollFailureTransitionsToStale() throws Exception {
+        // init succeeds
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        // poll fails (enqueue enough for retries)
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        // long grace so state stays STALE during the assertion window
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+
+        // wait for a poll to happen and fail
+        Thread.sleep(300);
+
+        assertEquals(ProviderState.STALE, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void gracePeriodExpiryTransitionsToError() throws Exception {
+        // init succeeds
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        // all subsequent polls fail
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS * 10; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        DynatraceProvider p = fastProvider();
+        p.initialize(new ImmutableContext());
+
+        // wait for poll failure + grace period (200ms) + buffer
+        Thread.sleep(600);
+
+        assertEquals(ProviderState.ERROR, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void recoveryFromStaleToReady() throws Exception {
+        // init succeeds
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        // first poll fails
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+        // second poll succeeds (304 not modified)
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = fastProvider();
+        p.initialize(new ImmutableContext());
+
+        // wait for failure + recovery
+        Thread.sleep(400);
+
+        assertEquals(ProviderState.READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void shutdownResetsStateToNotReady() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+
+        DynatraceProvider p = provider();
+        p.initialize(new ImmutableContext());
+        assertEquals(ProviderState.READY, p.getState());
+
+        p.shutdown();
+        assertEquals(ProviderState.NOT_READY, p.getState());
+    }
+
+    // -- options tests --
+
     @Test
     void cdnUrlDerivedFromKey() {
         DynatraceProviderOptions options =
@@ -145,7 +263,6 @@ class DynatraceProviderTest {
 
     @Test
     void builderAcceptsArbitraryAlphabeticGeo() {
-        // any alphabetic geo is accepted (e.g. de, oc, apac)
         DynatraceProviderOptions de =
                 DynatraceProviderOptions.builder("dt_server_de_03ee0ef7cd4244bfb8b71fea8f783f53").build();
         assertTrue(de.getCdnUrl().contains("cdn.de.fm.dynatrace.com"));
@@ -167,17 +284,14 @@ class DynatraceProviderTest {
 
     @Test
     void builderRejectsInvalidKeyFormat() {
-        // missing dt_ prefix
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("notavalidkey"));
-        // not enough segments
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("dt_server_us"));
     }
 
     @Test
     void builderRejectsNonServerType() {
-        // this is a server-side provider; reject web and mobile keys
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("dt_web_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
         assertThrows(IllegalArgumentException.class, () ->
@@ -188,7 +302,6 @@ class DynatraceProviderTest {
 
     @Test
     void builderRejectsNonAlphabeticGeo() {
-        // dashes, dots, and digits are rejected
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("dt_server_us-east_03ee0ef7cd4244bfb8b71fea8f783f53"));
         assertThrows(IllegalArgumentException.class, () ->
@@ -199,10 +312,8 @@ class DynatraceProviderTest {
 
     @Test
     void builderRejectsInvalidIdLength() {
-        // too short
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("dt_server_us_abc123"));
-        // too long
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53extra"));
     }
