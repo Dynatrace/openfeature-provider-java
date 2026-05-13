@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>Usage:
  * <pre>{@code
- * DynatraceProviderOptions options = DynatraceProviderOptions.builder("dt_server_us_de848e97a9cc4cc78aae568e65f49a9d")
+ * DynatraceProviderOptions options = DynatraceProviderOptions.builder("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5")
  *     .build();
  *
  * OpenFeatureAPI.getInstance().setProvider(new DynatraceProvider(options));
