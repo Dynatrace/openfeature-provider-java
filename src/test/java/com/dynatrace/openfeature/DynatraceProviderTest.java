@@ -20,7 +20,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class DynatraceProviderTest {
 
-    private static final String TEST_KEY = "dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53";
+    private static final String TEST_KEY =
+            "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5";
     private static final String FLAG_CONFIG = TestFixtures.FLAG_CONFIG;
 
     private MockWebServer server;
@@ -248,31 +249,43 @@ class DynatraceProviderTest {
     @Test
     void cdnUrlDerivedFromKey() {
         DynatraceProviderOptions options =
-                DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+                DynatraceProviderOptions.builder(
+                        "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5").build();
         assertEquals(
-                "https://cdn.us.fm.dynatrace.com/server/dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53.json",
+                "https://cdn.us.fm.dynatrace.com/server/"
+                        + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json",
                 options.getCdnUrl());
     }
 
     @Test
     void cdnUrlUsesGeoFromKey() {
         DynatraceProviderOptions eu =
-                DynatraceProviderOptions.builder("dt_server_eu_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+                DynatraceProviderOptions.builder(
+                        "dt01.server_eu_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5").build();
         assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com/server/"));
     }
 
     @Test
     void builderAcceptsArbitraryAlphabeticGeo() {
         DynatraceProviderOptions de =
-                DynatraceProviderOptions.builder("dt_server_de_03ee0ef7cd4244bfb8b71fea8f783f53").build();
+                DynatraceProviderOptions.builder(
+                        "dt01.server_de_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5").build();
         assertTrue(de.getCdnUrl().contains("cdn.de.fm.dynatrace.com"));
     }
 
     @Test
     void builderTrimsWhitespaceFromKey() {
         DynatraceProviderOptions options = DynatraceProviderOptions
-                .builder("  dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53  ").build();
-        assertEquals("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53", options.getKey());
+                .builder("  dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5  ").build();
+        assertEquals(
+                "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5",
+                options.getKey());
+    }
+
+    @Test
+    void publicKeyExposesOnlyPublicSegment() {
+        DynatraceProviderOptions options = DynatraceProviderOptions.builder(TEST_KEY).build();
+        assertEquals("dt01.server_us_abcdef1234", options.getPublicKey());
     }
 
     @Test
@@ -284,38 +297,60 @@ class DynatraceProviderTest {
 
     @Test
     void builderRejectsInvalidKeyFormat() {
+        // completely invalid
         assertThrows(IllegalArgumentException.class, () ->
                 DynatraceProviderOptions.builder("notavalidkey"));
+        // old format is no longer valid
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_us"));
+                DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
+        // missing private segment
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt01.server_us_abcdef1234"));
+        // publicRandom too short (< 10 chars)
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder("dt01.server_us_abc.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
     void builderRejectsNonServerType() {
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_web_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                DynatraceProviderOptions.builder(
+                        "dt01.web_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_mobile_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
-        assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_unknown_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                DynatraceProviderOptions.builder(
+                        "dt01.mobile_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
-    void builderRejectsNonAlphabeticGeo() {
+    void builderRejectsInvalidGeo() {
+        // hyphen in geo
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_us-east_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                DynatraceProviderOptions.builder(
+                        "dt01.server_us-east_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+        // uppercase geo
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_x.y_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                DynatraceProviderOptions.builder(
+                        "dt01.server_US_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+        // single-char geo (min is 2)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_us2_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                DynatraceProviderOptions.builder(
+                        "dt01.server_u_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
-    void builderRejectsInvalidIdLength() {
+    void builderRejectsInvalidPrivateSegment() {
+        // secret too short (< 32 hex chars)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_us_abc123"));
+                DynatraceProviderOptions.builder(
+                        "dt01.server_us_abcdef1234.abc123_a1b2c3d4e5"));
+        // missing sha1 (no underscore after secret)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53extra"));
+                DynatraceProviderOptions.builder(
+                        "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d"));
+        // sha1 too short (< 10 chars)
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder(
+                        "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_abc12"));
     }
 
     @Test
@@ -324,7 +359,8 @@ class DynatraceProviderTest {
                 .cdnBaseUrl("https://cdn.example.com/server")
                 .build();
         assertEquals(
-                "https://cdn.example.com/server/dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53.json",
+                "https://cdn.example.com/server/"
+                        + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json",
                 options.getCdnUrl());
     }
 

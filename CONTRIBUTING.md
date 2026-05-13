@@ -64,7 +64,7 @@ jshell --class-path "$PROVIDER_JAR:$DEPS:$SLF4J_SIMPLE"
 import com.dynatrace.openfeature.*;
 import dev.openfeature.sdk.*;
 
-var options = DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53").cdnBaseUrl("https://cdn.us.fm.dynatracelabs.com/server/").build();
+var options = DynatraceProviderOptions.builder("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5").cdnBaseUrl("https://cdn.us.fm.dynatracelabs.com/server/").build();
 var provider = new DynatraceProvider(options);
 OpenFeatureAPI.getInstance().setProviderAndWait(provider);
 var client = OpenFeatureAPI.getInstance().getClient();
