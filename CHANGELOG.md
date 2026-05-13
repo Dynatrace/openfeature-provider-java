@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.1.0-alpha...v0.2.0-alpha) (2026-05-13)
+
+
+### ✨ New Features
+
+* update SDK key format, ref: ICP-4977 ([#9](https://github.com/Dynatrace/openfeature-provider-java/issues/9)) ([e37fce5](https://github.com/Dynatrace/openfeature-provider-java/commit/e37fce5d9a77ab2b02b80fb1523525b90a902769))
+
+
+### 🧹 Chore
+
+* lint single-commit PR messages ([#7](https://github.com/Dynatrace/openfeature-provider-java/issues/7)) ([7b0e525](https://github.com/Dynatrace/openfeature-provider-java/commit/7b0e5258518362d931a01b1af6211647057c643f))
+
 ## [0.1.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.0.2-alpha...v0.1.0-alpha) (2026-05-12)
 
 
