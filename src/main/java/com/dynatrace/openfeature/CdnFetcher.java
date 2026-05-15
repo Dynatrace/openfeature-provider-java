@@ -46,7 +46,7 @@ final class CdnFetcher {
             DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ENGLISH);
 
     /** bounds how long a single attempt holds the polling worker thread; ensures next-tick cancellation takes effect promptly */
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
+    static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
     /** default Retry-After duration when 429 has no header */
     private static final long DEFAULT_RETRY_AFTER_MS = 60_000L;
