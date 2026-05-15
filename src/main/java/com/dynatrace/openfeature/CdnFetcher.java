@@ -85,10 +85,10 @@ final class CdnFetcher {
      * <p>If currently rate-limited (429), returns a 429 {@link FetchResult} immediately
      * without making a network request.
      *
-     * <p>Uses {@code tryLock} as a defensive guard: under normal operation {@link PollingManager}
-     * cancels the previous poll before starting the next, so concurrent calls are rare. The lock
-     * ensures that if a cancelled fetch hasn't fully unwound yet, the new fetch skips rather than
-     * racing the dying one's state mutation.
+     * <p>Uses {@code tryLock} to serialise concurrent callers. The polling worker is single-threaded,
+     * so back-to-back poll invocations are already sequential. The lock guards against concurrent
+     * calls from other paths (e.g. a future SSE-triggered re-fetch on a different thread) racing
+     * the in-progress fetch's {@code state} mutation.
      *
      * @return {@link FetchResult}; body is null on 304, 429, or on a stale-node response
      * @throws IOException on network failure after all retry attempts exhausted

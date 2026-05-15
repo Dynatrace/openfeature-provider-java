@@ -114,6 +114,13 @@ final class PollingManager {
         try {
             FetchResult result = fetchFlags.call();
 
+            // cancel(true) may arrive after fetchFlags returns but before we apply the result;
+            // discard rather than emit stale events into the provider state machine
+            if (Thread.currentThread().isInterrupted()) {
+                log.debug("poll cancelled after fetch returned; discarding result");
+                return;
+            }
+
             if (result.isNotModified()) {
                 log.debug("flags not modified");
                 emitSuccess.run();
