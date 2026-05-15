@@ -6,18 +6,25 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
  * Manages periodic polling of flag configurations.
  *
- * <p>Runs a single-threaded daemon scheduler that periodically fetches,
- * applies, and notifies about flag configuration changes.
+ * <p>Polling fires on a fixed schedule anchored to when each request is initiated, not when
+ * the previous request completed. If a previous fetch is still in its retry/backoff cycle when
+ * the next interval elapses, that fetch is cancelled and a fresh one begins.
+ *
+ * <p>Two executors are used: a single-threaded ticker that fires every {@code pollInterval} ms,
+ * and a single-threaded worker that runs the actual fetch+retry work. The ticker is never blocked
+ * by slow fetches.
  */
 final class PollingManager {
 
@@ -30,8 +37,9 @@ final class PollingManager {
     private final Consumer<String> emitFailure;
     private final Duration pollInterval;
 
-    private ScheduledExecutorService scheduler;
-    private ScheduledFuture<?> pollFuture;
+    private ScheduledExecutorService ticker;
+    private ExecutorService worker;
+    private final AtomicReference<Future<?>> currentPoll = new AtomicReference<>();
 
     /**
      * @param fetchFlags   called to fetch flag configuration JSON from the CDN
@@ -39,7 +47,7 @@ final class PollingManager {
      * @param emitChange   called with the list of changed flag keys after a successful store
      * @param emitSuccess  called after any successful poll (including 304 not-modified)
      * @param emitFailure  called with a reason string when a poll fails
-     * @param pollInterval delay between consecutive polls
+     * @param pollInterval interval between poll initiations (measured from start-of-request, not end)
      */
     PollingManager(
             Callable<FetchResult> fetchFlags,
@@ -60,28 +68,46 @@ final class PollingManager {
      * Starts polling. Must be called after initial fetch/store succeeds.
      */
     void start() {
-        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        worker = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "dt-provider-poller");
             t.setDaemon(true);
             return t;
         });
-        pollFuture = scheduler.scheduleWithFixedDelay(
-                this::poll,
+        ticker = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "dt-provider-ticker");
+            t.setDaemon(true);
+            return t;
+        });
+        ticker.scheduleAtFixedRate(
+                this::tick,
                 pollInterval.toMillis(),
                 pollInterval.toMillis(),
                 TimeUnit.MILLISECONDS);
     }
 
     /**
-     * Stops polling and shuts down the scheduler.
+     * Stops polling and shuts down both executors. Interrupts any in-flight retry cycle.
      */
     void stop() {
-        if (pollFuture != null) {
-            pollFuture.cancel(false);
+        if (ticker != null) {
+            ticker.shutdownNow();
         }
-        if (scheduler != null) {
-            scheduler.shutdown();
+        Future<?> poll = currentPoll.getAndSet(null);
+        if (poll != null) {
+            poll.cancel(true);
         }
+        if (worker != null) {
+            worker.shutdownNow();
+        }
+    }
+
+    private void tick() {
+        Future<?> prev = currentPoll.getAndSet(null);
+        if (prev != null && !prev.isDone()) {
+            log.debug("cancelling in-flight poll; starting fresh");
+            prev.cancel(true);
+        }
+        currentPoll.set(worker.submit(this::poll));
     }
 
     private void poll() {
@@ -119,8 +145,26 @@ final class PollingManager {
                 emitChange.accept(changedKeys);
             }
         } catch (Exception e) {
+            if (isInterrupted(e)) {
+                log.debug("poll cancelled by next tick");
+                return;
+            }
             log.warn("poll failed", e);
             emitFailure.accept(e.getMessage());
         }
+    }
+
+    private static boolean isInterrupted(Exception e) {
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        Throwable cause = e;
+        while (cause != null) {
+            if (cause instanceof InterruptedException) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
     }
 }
