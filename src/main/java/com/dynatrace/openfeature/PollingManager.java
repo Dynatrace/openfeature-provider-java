@@ -100,7 +100,11 @@ final class PollingManager {
             log.debug("cancelling in-flight poll; starting fresh");
             prev.cancel(true);
         }
-        currentPoll.set(worker.submit(this::poll));
+        try {
+            currentPoll.set(worker.submit(this::poll));
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // worker was shut down by stop(); tick is a no-op
+        }
     }
 
     private void poll() {
@@ -108,8 +112,9 @@ final class PollingManager {
             FetchResult result = fetchFlags.call();
 
             // cancel(true) may arrive after fetchFlags returns but before we apply the result;
-            // discard rather than emit stale events into the provider state machine
-            if (Thread.currentThread().isInterrupted()) {
+            // discard rather than emit stale events into the provider state machine.
+            // Thread.interrupted() clears the flag so the next poll on this reused thread is unaffected.
+            if (Thread.interrupted()) {
                 log.debug("poll cancelled after fetch returned; discarding result");
                 return;
             }
@@ -163,7 +168,8 @@ final class PollingManager {
     }
 
     private static boolean isInterrupted(Exception e) {
-        if (Thread.currentThread().isInterrupted()) {
+        // Thread.interrupted() clears the flag so the reused worker thread starts clean next poll
+        if (Thread.interrupted()) {
             return true;
         }
         Throwable cause = e;
