@@ -120,14 +120,23 @@ final class EvaluationMetricsFlusher {
 
     /**
      * Schedules an out-of-band flush on the flusher's executor without blocking the caller.
-     * If a flush is already queued or the flusher has shut down, this is a no-op. Safe to
-     * call before {@link #start()}.
+     * Safe to call before {@link #start()}.
+     *
+     * <p>Unlike {@link #onRecord()}, this method does <em>not</em> coalesce with an in-flight
+     * flush — each call submits a fresh task to the scheduler. This is intentional: callers
+     * (config rotation, shutdown-style code paths) need the guarantee that their just-enqueued
+     * sealed batch will be picked up promptly even if another flush is still completing. The
+     * extra task is cheap when there is nothing to deliver (empty deque + empty aggregator).
      */
     void triggerFlush() {
         if (shutdown.get()) {
             return;
         }
-        scheduleOutOfBandFlush();
+        try {
+            scheduler.execute(this::flushQuietly);
+        } catch (RejectedExecutionException ignored) {
+            // Scheduler is shutting down; the shutdown() flush will drain remaining metrics.
+        }
     }
 
     /**

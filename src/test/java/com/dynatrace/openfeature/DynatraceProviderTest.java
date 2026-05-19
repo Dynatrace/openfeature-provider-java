@@ -473,10 +473,16 @@ class DynatraceProviderTest {
 
             flusher.onRecord();
 
-            assertEquals(0L, aggregator.size());
+            // Sync on the first (failed) request first — onRecord schedules work on the flusher's
+            // single-threaded executor, so checking aggregator.size() right after onRecord would
+            // race the scheduler thread. By the time the server has received the request, drain()
+            // has definitely run and emptied the live map.
             RecordedRequest failedReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
             assertNotNull(failedReq);
             assertEquals("/v1/metrics", failedReq.getPath());
+            assertEquals(0L, aggregator.size(),
+                    "failed batch must not be merged back into the live aggregator — that would lose "
+                            + "the captured version on the next config rotation");
 
             flusher.triggerFlush();
             RecordedRequest retryReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
