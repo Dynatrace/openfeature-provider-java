@@ -290,6 +290,49 @@ class PollingManagerTest {
         assertTrue(interrupted.get(), "in-flight poll should have been interrupted by stop()");
     }
 
+    @Test
+    @Timeout(3)
+    void pollingResumesNormallyAfterCancellation() throws InterruptedException {
+        // Verifies the interrupt flag is cleared after cancellation so subsequent polls
+        // on the reused worker thread are not immediately discarded.
+        CountDownLatch successAfterCancel = new CountDownLatch(1);
+        AtomicInteger callCount = new AtomicInteger();
+
+        create(
+                () -> {
+                    int call = callCount.incrementAndGet();
+                    if (call == 1) {
+                        Thread.sleep(10_000); // hang until cancelled by next tick
+                    }
+                    return new FetchResult(200, "{}", null, null);
+                },
+                body -> Collections.emptyList(),
+                keys -> {},
+                successAfterCancel::countDown,
+                reason -> fail("unexpected failure after cancellation: " + reason)
+        ).start();
+
+        assertTrue(successAfterCancel.await(2, TimeUnit.SECONDS),
+                "polling should emit success after resuming from a cancellation");
+    }
+
+    @Test
+    @Timeout(3)
+    void stopDuringActiveTickingDoesNotThrow() throws InterruptedException {
+        // Verifies tick() silently handles RejectedExecutionException when stop() races
+        // with an in-progress tick submission.
+        CountDownLatch firstStarted = new CountDownLatch(1);
+
+        create(
+                () -> { firstStarted.countDown(); return new FetchResult(304, null, null, null); },
+                body -> null, keys -> {}, () -> {}, reason -> {}
+        ).start();
+
+        assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
+        // stop() while ticks are firing — should not throw or leave threads running
+        manager.stop();
+    }
+
     /**
      * Returns a fetchFlags callable whose first invocation hangs until interrupted.
      * @param onFirstStart  counted down when the first call begins (nullable)
