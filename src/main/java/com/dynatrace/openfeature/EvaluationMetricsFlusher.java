@@ -213,7 +213,7 @@ final class EvaluationMetricsFlusher {
         }
 
         // Then flush whatever has accumulated in the live aggregator. Same try/finally pattern:
-        // if flushBatch throws after drain(), we must merge the snapshot back so counts aren't lost.
+        // if flushBatch throws after drain(), we must requeue the snapshot so counts aren't lost.
         DynatraceMetricsAggregator.DrainedBatch live = aggregator.drain();
         if (live.isEmpty()) {
             return;
@@ -223,10 +223,14 @@ final class EvaluationMetricsFlusher {
             delivered = flushBatch(live);
         } finally {
             if (!delivered) {
-                try {
-                    aggregator.merge(live.getEvaluations());
-                } catch (RuntimeException e) {
-                    log.warn("failed to requeue drained metrics batch: {}", e.toString());
+                if (live.getVersion() == null) {
+                    try {
+                        aggregator.merge(live.getEvaluations());
+                    } catch (RuntimeException e) {
+                        log.warn("failed to requeue drained metrics batch: {}", e.toString());
+                    }
+                } else {
+                    sealedBatches.offerFirst(live);
                 }
             }
         }

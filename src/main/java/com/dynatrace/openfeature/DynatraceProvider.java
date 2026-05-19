@@ -86,24 +86,30 @@ public final class DynatraceProvider extends EventProvider {
         this(options, new FlagdCore(), buildDefaultHttpClient());
     }
 
-    // for testing
+    /**
+     * Package-private convenience constructor. Production code reaches it via the public
+     * single-arg constructor (above); tests use it directly to inject a mock {@link HttpClient}.
+     *
+     * <p>The supplied {@code httpClient} is shared between the {@link CdnFetcher} and the
+     * evaluation-metrics flusher so both use a single connection pool and TLS-session cache.
+     */
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
         this(options, flagdCore, new CdnFetcher(options.getCdnUrl(), httpClient), httpClient,
                 POLL_INTERVAL, GRACE_PERIOD);
     }
 
-    // for testing
+    // tests only: inject a pre-built CdnFetcher (e.g. with a stubbed response sequence)
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher) {
         this(options, flagdCore, fetcher, buildDefaultHttpClient(), POLL_INTERVAL, GRACE_PERIOD);
     }
 
-    // for testing
+    // tests only: as above, plus control over poll/grace timings
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
         this(options, flagdCore, fetcher, buildDefaultHttpClient(), pollInterval, gracePeriod);
     }
 
-    // for testing — primary all-deps constructor
+    // tests only: primary all-deps constructor; lets tests inject every collaborator individually
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
                       HttpClient metricsHttpClient, Duration pollInterval, Duration gracePeriod) {
         this.options = options;
@@ -239,8 +245,8 @@ public final class DynatraceProvider extends EventProvider {
         }
         // Seal the in-flight batch against the old version before installing new flags. The
         // flusher delivers sealed batches ahead of any live data on its next cycle.
-        DynatraceMetricsAggregator.DrainedBatch sealed = metricsAggregator.drain();
-        metricsFlusher.enqueueSealedBatch(sealed);
+        DynatraceMetricsAggregator.DrainedBatch sealedMetrics = metricsAggregator.drain();
+        metricsFlusher.enqueueSealedBatch(sealedMetrics);
         metricsFlusher.triggerFlush();
         try {
             return flagdCore.setFlagsAndGetChangedKeys(json);

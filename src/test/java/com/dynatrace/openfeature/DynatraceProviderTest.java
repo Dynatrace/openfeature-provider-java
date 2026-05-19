@@ -455,6 +455,7 @@ class DynatraceProviderTest {
         try (MockWebServer metricsServer = new MockWebServer()) {
             metricsServer.start();
             metricsServer.enqueue(new MockResponse().setResponseCode(500));
+            metricsServer.enqueue(new MockResponse().setResponseCode(202));
 
             DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
             aggregator.setVersion("1741780800");
@@ -468,13 +469,69 @@ class DynatraceProviderTest {
                     1,
                     "1.2.3",
                     "dynatrace");
+            flusher.start();
+
+            flusher.onRecord();
+
+            assertEquals(0L, aggregator.size());
+            RecordedRequest failedReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(failedReq);
+            assertEquals("/v1/metrics", failedReq.getPath());
+
+            flusher.triggerFlush();
+            RecordedRequest retryReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(retryReq, "versioned failed batch should retry as a sealed batch");
+            assertTrue(retryReq.getBody().readUtf8().contains("\"version\":\"1741780800\""));
+
+            flusher.shutdown();
+        }
+    }
+
+    @Test
+    void failedLiveFlushRetriesWithOriginalVersionAfterConfigChange() throws Exception {
+        try (MockWebServer metricsServer = new MockWebServer()) {
+            metricsServer.start();
+            metricsServer.enqueue(new MockResponse().setResponseCode(500));
+            metricsServer.enqueue(new MockResponse().setResponseCode(202));
+            metricsServer.enqueue(new MockResponse().setResponseCode(202));
+
+            DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+            aggregator.setVersion("1741780800");
+            aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820L);
+            EvaluationMetricsFlusher flusher = new EvaluationMetricsFlusher(
+                    aggregator,
+                    httpClient,
+                    TEST_KEY,
+                    metricsServer.url("/").toString(),
+                    Duration.ofMinutes(5),
+                    1,
+                    "1.2.3",
+                    "dynatrace");
+            flusher.start();
+
+            flusher.onRecord();
+            RecordedRequest failedReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(failedReq, "expected first live flush attempt");
+            assertTrue(failedReq.getBody().readUtf8().contains("\"version\":\"1741780800\""));
+
+            aggregator.setVersion("1741780900");
+            aggregator.record("new-flag", "on", "static", null, 1741780910L);
 
             flusher.shutdown();
 
-            assertEquals(1L, aggregator.size());
-            RecordedRequest req = metricsServer.takeRequest(5, TimeUnit.SECONDS);
-            assertNotNull(req);
-            assertEquals("/v1/metrics", req.getPath());
+            RecordedRequest retryReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(retryReq, "expected retry of failed old-version batch");
+            String retryBody = retryReq.getBody().readUtf8();
+            assertTrue(retryBody.contains("\"version\":\"1741780800\""), retryBody);
+            assertTrue(retryBody.contains("\"flagKey\":\"header-redesign\""), retryBody);
+            assertFalse(retryBody.contains("new-flag"), retryBody);
+
+            RecordedRequest liveReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(liveReq, "expected new-version live batch");
+            String liveBody = liveReq.getBody().readUtf8();
+            assertTrue(liveBody.contains("\"version\":\"1741780900\""), liveBody);
+            assertTrue(liveBody.contains("\"flagKey\":\"new-flag\""), liveBody);
+            assertFalse(liveBody.contains("header-redesign"), liveBody);
         }
     }
 
@@ -503,8 +560,8 @@ class DynatraceProviderTest {
 
         flusher.shutdown();
 
-        assertEquals(1L, aggregator.size(),
-                "drained batch must be requeued even when send() throws an unchecked exception");
+        assertEquals(0L, aggregator.size(),
+                "versioned failed batch must be preserved outside the live aggregator");
     }
 
     @Test
