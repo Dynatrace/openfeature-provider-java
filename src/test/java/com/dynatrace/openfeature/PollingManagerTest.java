@@ -248,28 +248,8 @@ class PollingManagerTest {
         CountDownLatch secondStarted = new CountDownLatch(1);
         AtomicReference<Boolean> firstInterrupted = new AtomicReference<>(false);
 
-        AtomicInteger callCount = new AtomicInteger();
-        create(
-                () -> {
-                    int call = callCount.incrementAndGet();
-                    if (call == 1) {
-                        firstStarted.countDown();
-                        try {
-                            Thread.sleep(10_000); // hang until interrupted
-                        } catch (InterruptedException e) {
-                            firstInterrupted.set(true);
-                            Thread.currentThread().interrupt();
-                            throw e;
-                        }
-                    } else {
-                        secondStarted.countDown();
-                    }
-                    return new FetchResult(304, null, null, null);
-                },
-                body -> null,
-                keys -> {},
-                () -> {},
-                reason -> {}
+        create(hangingFetch(firstStarted, secondStarted, firstInterrupted),
+                body -> null, keys -> {}, () -> {}, reason -> {}
         ).start();
 
         assertTrue(firstStarted.await(1, TimeUnit.SECONDS), "first poll should start");
@@ -282,22 +262,9 @@ class PollingManagerTest {
     void cancelledPollDoesNotEmitFailure() throws InterruptedException {
         CountDownLatch secondStarted = new CountDownLatch(1);
         AtomicInteger failureCount = new AtomicInteger();
-        AtomicInteger callCount = new AtomicInteger();
 
-        create(
-                () -> {
-                    int call = callCount.incrementAndGet();
-                    if (call == 1) {
-                        Thread.sleep(10_000); // hang until interrupted by next tick
-                    } else {
-                        secondStarted.countDown();
-                    }
-                    return new FetchResult(304, null, null, null);
-                },
-                body -> null,
-                keys -> {},
-                () -> {},
-                reason -> failureCount.incrementAndGet()
+        create(hangingFetch(null, secondStarted, null),
+                body -> null, keys -> {}, () -> {}, reason -> failureCount.incrementAndGet()
         ).start();
 
         assertTrue(secondStarted.await(1, TimeUnit.SECONDS));
@@ -310,22 +277,8 @@ class PollingManagerTest {
         CountDownLatch started = new CountDownLatch(1);
         AtomicReference<Boolean> interrupted = new AtomicReference<>(false);
 
-        create(
-                () -> {
-                    started.countDown();
-                    try {
-                        Thread.sleep(10_000);
-                    } catch (InterruptedException e) {
-                        interrupted.set(true);
-                        Thread.currentThread().interrupt();
-                        throw e;
-                    }
-                    return new FetchResult(304, null, null, null);
-                },
-                body -> null,
-                keys -> {},
-                () -> {},
-                reason -> {}
+        create(hangingFetch(started, null, interrupted),
+                body -> null, keys -> {}, () -> {}, reason -> {}
         ).start();
 
         assertTrue(started.await(1, TimeUnit.SECONDS));
@@ -335,5 +288,33 @@ class PollingManagerTest {
 
         assertTrue(elapsed < 500, "stop() should return promptly, took " + elapsed + "ms");
         assertTrue(interrupted.get(), "in-flight poll should have been interrupted by stop()");
+    }
+
+    /**
+     * Returns a fetchFlags callable whose first invocation hangs until interrupted.
+     * @param onFirstStart  counted down when the first call begins (nullable)
+     * @param onSecondStart counted down when the second call begins (nullable)
+     * @param wasInterrupted set to true if the hang is ended by an interrupt (nullable)
+     */
+    private static Callable<FetchResult> hangingFetch(
+            CountDownLatch onFirstStart,
+            CountDownLatch onSecondStart,
+            AtomicReference<Boolean> wasInterrupted) {
+        AtomicInteger callCount = new AtomicInteger();
+        return () -> {
+            if (callCount.incrementAndGet() == 1) {
+                if (onFirstStart != null) onFirstStart.countDown();
+                try {
+                    Thread.sleep(10_000);
+                } catch (InterruptedException e) {
+                    if (wasInterrupted != null) wasInterrupted.set(true);
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            } else {
+                if (onSecondStart != null) onSecondStart.countDown();
+            }
+            return new FetchResult(304, null, null, null);
+        };
     }
 }

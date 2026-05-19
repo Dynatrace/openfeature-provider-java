@@ -10,6 +10,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -68,16 +69,8 @@ final class PollingManager {
      * Starts polling. Must be called after initial fetch/store succeeds.
      */
     void start() {
-        worker = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "dt-provider-poller");
-            t.setDaemon(true);
-            return t;
-        });
-        ticker = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "dt-provider-ticker");
-            t.setDaemon(true);
-            return t;
-        });
+        worker = Executors.newSingleThreadExecutor(daemonThread("dt-provider-poller"));
+        ticker = Executors.newSingleThreadScheduledExecutor(daemonThread("dt-provider-ticker"));
         ticker.scheduleAtFixedRate(
                 this::tick,
                 pollInterval.toMillis(),
@@ -159,6 +152,14 @@ final class PollingManager {
             log.warn("poll failed", e);
             emitFailure.accept(e.getMessage());
         }
+    }
+
+    private static ThreadFactory daemonThread(String name) {
+        return r -> {
+            Thread t = new Thread(r, name);
+            t.setDaemon(true);
+            return t;
+        };
     }
 
     private static boolean isInterrupted(Exception e) {

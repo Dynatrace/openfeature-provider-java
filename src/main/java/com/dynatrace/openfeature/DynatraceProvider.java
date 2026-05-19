@@ -71,18 +71,19 @@ public final class DynatraceProvider extends EventProvider {
      * @param options provider configuration (SDK key, optional CDN base URL override)
      */
     public DynatraceProvider(DynatraceProviderOptions options) {
-        // poll interval must exceed the per-request timeout; otherwise the ticker cancels every
-        // poll before its first attempt can complete
-        if (POLL_INTERVAL.compareTo(CdnFetcher.REQUEST_TIMEOUT) <= 0) {
+        this(options, new FlagdCore(), new CdnFetcher(options.getCdnUrl(), buildDefaultHttpClient()),
+                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+    }
+
+    // poll interval must exceed the per-request timeout; otherwise the ticker cancels every
+    // poll before its first attempt can complete
+    private static Duration validatedPollInterval(Duration pollInterval) {
+        if (pollInterval.compareTo(CdnFetcher.REQUEST_TIMEOUT) <= 0) {
             throw new IllegalArgumentException(
-                    "pollInterval (" + POLL_INTERVAL.toMillis() + "ms) must be greater than the "
+                    "pollInterval (" + pollInterval.toMillis() + "ms) must be greater than the "
                     + "request timeout (" + CdnFetcher.REQUEST_TIMEOUT.toMillis() + "ms)");
         }
-        this.options = options;
-        this.flagdCore = new FlagdCore();
-        this.fetcher = new CdnFetcher(options.getCdnUrl(), buildDefaultHttpClient());
-        this.pollInterval = POLL_INTERVAL;
-        this.gracePeriod = GRACE_PERIOD;
+        return pollInterval;
     }
 
     // for testing
