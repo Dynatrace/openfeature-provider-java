@@ -2,6 +2,7 @@ package com.dynatrace.openfeature;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -217,6 +218,7 @@ class PollingManagerTest {
     }
 
     @Test
+    @Timeout(2)
     void pollFiresOnFixedSchedule() throws InterruptedException {
         // fetchFlags blocks for longer than the poll interval; verify the ticker
         // doesn't wait for the previous fetch to finish before firing the next one.
@@ -234,12 +236,13 @@ class PollingManagerTest {
                 reason -> {}
         ).start();
 
-        // 3 fetches should have started well within 300ms (3 × 50ms ticks + slack)
+        // 3 ticks × 50ms interval = 150ms minimum; 1s gives ample headroom for scheduling jitter
         assertTrue(startedLatch.await(1, TimeUnit.SECONDS),
                 "polling should fire on a fixed schedule regardless of fetch duration");
     }
 
     @Test
+    @Timeout(3)
     void hangingPollIsCancelledOnNextTick() throws InterruptedException {
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch secondStarted = new CountDownLatch(1);
@@ -275,6 +278,7 @@ class PollingManagerTest {
     }
 
     @Test
+    @Timeout(3)
     void cancelledPollDoesNotEmitFailure() throws InterruptedException {
         CountDownLatch secondStarted = new CountDownLatch(1);
         AtomicInteger failureCount = new AtomicInteger();
@@ -301,6 +305,7 @@ class PollingManagerTest {
     }
 
     @Test
+    @Timeout(3)
     void stopInterruptsInFlightPoll() throws InterruptedException {
         CountDownLatch started = new CountDownLatch(1);
         AtomicReference<Boolean> interrupted = new AtomicReference<>(false);
