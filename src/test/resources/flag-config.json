@@ -1,4 +1,7 @@
 {
+  "metadata": {
+    "version": "1741780800"
+  },
   "flags": {
     "my-bool-flag": {
       "state": "ENABLED",

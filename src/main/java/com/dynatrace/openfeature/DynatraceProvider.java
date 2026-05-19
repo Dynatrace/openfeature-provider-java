@@ -4,6 +4,7 @@ import dev.openfeature.contrib.tools.flagd.api.FlagStoreException;
 import dev.openfeature.contrib.tools.flagd.core.FlagdCore;
 import dev.openfeature.sdk.EvaluationContext;
 import dev.openfeature.sdk.EventProvider;
+import dev.openfeature.sdk.Hook;
 import dev.openfeature.sdk.Metadata;
 import dev.openfeature.sdk.ProviderEvaluation;
 import dev.openfeature.sdk.ProviderEventDetails;
@@ -14,7 +15,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.time.Clock;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -28,7 +31,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * Dynatrace OpenFeature provider for Java (server-side).
  *
  * <p>Wraps flagd-core for in-process evaluation and adds HTTP config fetching from the
- * Dynatrace CDN with ETag revalidation, polling, retry, and state management.
+ * Dynatrace CDN with ETag revalidation, polling, retry, and state management. Records
+ * evaluation metrics in-process and periodically POSTs them to the Dynatrace metrics endpoint.
  *
  * <p>Usage:
  * <pre>{@code
@@ -53,6 +57,14 @@ public final class DynatraceProvider extends EventProvider {
     private final CdnFetcher fetcher;
     private final Duration pollInterval;
     private final Duration gracePeriod;
+    private final DynatraceMetricsAggregator metricsAggregator;
+    private final EvaluationMetricsFlusher metricsFlusher;
+
+    // Hook is used as a raw type to match OpenFeature's getProviderHooks() contract:
+    //   public List<Hook> getProviderHooks()  // raw on purpose; hooks have heterogeneous T
+    @SuppressWarnings("rawtypes")
+    private final List<Hook> providerHooks;
+
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
     private final AtomicReference<ProviderState> state = new AtomicReference<>(ProviderState.NOT_READY);
@@ -71,27 +83,46 @@ public final class DynatraceProvider extends EventProvider {
      * @param options provider configuration (SDK key, optional CDN base URL override)
      */
     public DynatraceProvider(DynatraceProviderOptions options) {
-        this(options, new FlagdCore(), new CdnFetcher(options.getCdnUrl(), buildDefaultHttpClient()));
+        this(options, new FlagdCore(), buildDefaultHttpClient());
     }
 
     // for testing
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
-        this(options, flagdCore, new CdnFetcher(options.getCdnUrl(), httpClient));
+        this(options, flagdCore, new CdnFetcher(options.getCdnUrl(), httpClient), httpClient,
+                POLL_INTERVAL, GRACE_PERIOD);
     }
 
     // for testing
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher) {
-        this(options, flagdCore, fetcher, POLL_INTERVAL, GRACE_PERIOD);
+        this(options, flagdCore, fetcher, buildDefaultHttpClient(), POLL_INTERVAL, GRACE_PERIOD);
     }
 
     // for testing
     DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
+        this(options, flagdCore, fetcher, buildDefaultHttpClient(), pollInterval, gracePeriod);
+    }
+
+    // for testing — primary all-deps constructor
+    DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
+                      HttpClient metricsHttpClient, Duration pollInterval, Duration gracePeriod) {
         this.options = options;
         this.flagdCore = flagdCore;
         this.fetcher = fetcher;
         this.pollInterval = pollInterval;
         this.gracePeriod = gracePeriod;
+        this.metricsAggregator = new DynatraceMetricsAggregator(options.getMetricsHardCapSize());
+        this.metricsFlusher = new EvaluationMetricsFlusher(
+                metricsAggregator,
+                metricsHttpClient,
+                options.getKey(),
+                options.getMetricsUrl(),
+                options.getMetricsFlushInterval(),
+                options.getMetricsMaxAggregateSize(),
+                resolveSdkVersion(),
+                PROVIDER_NAME);
+        this.providerHooks = Collections.singletonList(
+                new DynatraceMetricsHook(metricsAggregator, Clock.systemUTC(), metricsFlusher::onRecord));
     }
 
     @Override
@@ -99,8 +130,15 @@ public final class DynatraceProvider extends EventProvider {
         return METADATA;
     }
 
+    @Override
+    @SuppressWarnings("rawtypes")
+    public List<Hook> getProviderHooks() {
+        return providerHooks;
+    }
+
     /**
-     * Fetches the initial configuration from the CDN and starts polling.
+     * Fetches the initial configuration from the CDN, starts polling, and starts the
+     * evaluation-metrics flusher.
      *
      * <p>The SDK calls this before making the provider available. It emits {@code PROVIDER_READY}
      * on success or {@code PROVIDER_ERROR} if this method throws.
@@ -127,6 +165,7 @@ public final class DynatraceProvider extends EventProvider {
         }
 
         try {
+            // Initial load — no prior version, so no metrics batch to seal yet. Just install flags.
             flagdCore.setFlags(body);
         } catch (FlagStoreException e) {
             throw new RuntimeException("initial CDN config is invalid: " + e.getMessage(), e);
@@ -151,10 +190,14 @@ public final class DynatraceProvider extends EventProvider {
                 pollInterval);
         pollingManager.start();
 
+        metricsFlusher.start();
         log.info("Dynatrace provider initialized successfully");
     }
 
-    /** Cancels in-flight requests, stops polling, and cleans up. Idempotent. */
+    /**
+     * Performs a final metrics flush, stops polling, cancels in-flight requests, and cleans up.
+     * Idempotent.
+     */
     @Override
     public void shutdown() {
         if (!shutdown.compareAndSet(false, true)) {
@@ -170,13 +213,35 @@ public final class DynatraceProvider extends EventProvider {
         if (gs != null) {
             gs.shutdown();
         }
+        try {
+            metricsFlusher.shutdown();
+        } catch (RuntimeException e) {
+            log.warn("metrics flusher shutdown failed: {}", e.toString());
+        }
         state.set(ProviderState.NOT_READY);
         super.shutdown();
         log.info("Dynatrace provider shut down");
     }
 
 
-    private List<String> storeFlags(String json) {
+    /**
+     * Installs a new flag-config body from the polling manager. Seals the current
+     * evaluation-metrics batch under the previous config version before swapping, so each
+     * flushed batch contains evaluations from exactly one config version.
+     *
+     * @return the list of flag keys whose values changed (forwarded to the OpenFeature event bus)
+     */
+    // package-private to let tests drive a config switch without standing up a real PollingManager
+    List<String> storeFlags(String json) {
+        if (shutdown.get()) {
+            throw new IllegalStateException(
+                    "storeFlags called after provider shutdown; ignoring new config");
+        }
+        // Seal the in-flight batch against the old version before installing new flags. The
+        // flusher delivers sealed batches ahead of any live data on its next cycle.
+        DynatraceMetricsAggregator.DrainedBatch sealed = metricsAggregator.drain();
+        metricsFlusher.enqueueSealedBatch(sealed);
+        metricsFlusher.triggerFlush();
         try {
             return flagdCore.setFlagsAndGetChangedKeys(json);
         } catch (FlagStoreException e) {
@@ -277,5 +342,11 @@ public final class DynatraceProvider extends EventProvider {
     private static HttpClient buildDefaultHttpClient() {
         return HttpClient.newBuilder()
                 .build();
+    }
+
+    private static String resolveSdkVersion() {
+        Package pkg = DynatraceProvider.class.getPackage();
+        String version = pkg == null ? null : pkg.getImplementationVersion();
+        return version == null ? "unknown" : version;
     }
 }

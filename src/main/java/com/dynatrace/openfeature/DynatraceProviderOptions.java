@@ -1,7 +1,11 @@
 package com.dynatrace.openfeature;
 
+import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Configuration options for {@link DynatraceProvider}.
@@ -10,20 +14,45 @@ import java.util.regex.Pattern;
  */
 public final class DynatraceProviderOptions {
 
+    private static final Logger log = LoggerFactory.getLogger(DynatraceProviderOptions.class);
+
     /** SDK key format: {token}.server_{geo}_{publicRandom}.{secret}_{sha1} */
     static final Pattern KEY_PATTERN = Pattern.compile(
             "^(dt[0-9]{2})\\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$");
+
+    /** Default periodic flush interval for the metrics hook. */
+    static final Duration DEFAULT_METRICS_FLUSH_INTERVAL = Duration.ofSeconds(30);
+
+    /**
+     * Default capacity threshold (distinct flag keys in the live aggregate map) at which the
+     * metrics hook triggers an out-of-band flush.
+     */
+    static final int DEFAULT_METRICS_MAX_AGGREGATE_SIZE = 1_000;
+
+    /**
+     * Default hard cap for the aggregate map. Once the live map holds this many distinct flag
+     * keys, evaluations of further new flags are dropped (existing flags keep accumulating).
+     */
+    static final int DEFAULT_METRICS_HARD_CAP_SIZE = 2_000;
 
     private final String key;
     private final String geo;
     private final String type;
     private final String cdnBaseUrlOverride; // null = derive from key
+    private final String metricsBaseUrlOverride; // null = derive from key
+    private final Duration metricsFlushInterval;
+    private final int metricsMaxAggregateSize;
+    private final int metricsHardCapSize;
 
     private DynatraceProviderOptions(Builder builder) {
         this.key = builder.key;
         this.geo = builder.geo;
         this.type = builder.type;
         this.cdnBaseUrlOverride = builder.cdnBaseUrlOverride;
+        this.metricsBaseUrlOverride = builder.metricsBaseUrlOverride;
+        this.metricsFlushInterval = builder.metricsFlushInterval;
+        this.metricsMaxAggregateSize = DEFAULT_METRICS_MAX_AGGREGATE_SIZE;
+        this.metricsHardCapSize = DEFAULT_METRICS_HARD_CAP_SIZE;
     }
 
     /**
@@ -52,6 +81,36 @@ public final class DynatraceProviderOptions {
     }
 
     /**
+     * Full URL the provider POSTs evaluation-metric batches to.
+     */
+    public String getMetricsUrl() {
+        return metricsBaseUrlOverride != null
+                ? metricsBaseUrlOverride
+                : "https://metrics." + geo + ".fm.dynatrace.com/";
+    }
+
+    /** Periodic flush interval for the evaluation-metrics hook. */
+    public Duration getMetricsFlushInterval() {
+        return metricsFlushInterval;
+    }
+
+    /**
+     * Soft capacity threshold (number of distinct flag keys in the live aggregate map) at which
+     * the metrics hook triggers an out-of-band flush.
+     */
+    public int getMetricsMaxAggregateSize() {
+        return metricsMaxAggregateSize;
+    }
+
+    /**
+     * Hard capacity for the aggregate map. Once the live map holds this many distinct flag
+     * keys, evaluations of further new flags are dropped (existing flags keep accumulating).
+     */
+    public int getMetricsHardCapSize() {
+        return metricsHardCapSize;
+    }
+
+    /**
      * @param key SDK key in the format {@code {token}.server_{geo}_{publicRandom}.{secret}_{sha1}}
      *            (e.g. {@code dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5}).
      *            Use {@link DynatraceProviderOptions#getPublicKey()} to safely surface the key in
@@ -67,6 +126,8 @@ public final class DynatraceProviderOptions {
         private final String geo;
         private final String type;
         String cdnBaseUrlOverride = null;
+        String metricsBaseUrlOverride = null;
+        Duration metricsFlushInterval = DEFAULT_METRICS_FLUSH_INTERVAL;
 
         private Builder(String key) {
             if (key == null || key.isBlank()) {
@@ -88,15 +149,37 @@ public final class DynatraceProviderOptions {
         }
 
         /**
-         * Override the CDN base URL. A trailing {@code /} is auto-appended if missing.
-         * For dev/labs environments (e.g. {@code https://cdn.us.fm.dynatracelabs.com/server/}).
-         * Production URL is derived automatically from the key.
+         * Override the CDN base URL.
          */
         public Builder cdnBaseUrl(String cdnBaseUrl) {
             if (cdnBaseUrl == null || cdnBaseUrl.isBlank()) {
                 throw new IllegalArgumentException("cdnBaseUrl must not be null or blank");
             }
             this.cdnBaseUrlOverride = cdnBaseUrl.endsWith("/") ? cdnBaseUrl : cdnBaseUrl + "/";
+            return this;
+        }
+
+        /**
+         * Override the metrics endpoint base URL.
+         */
+        public Builder metricsBaseUrl(String metricsBaseUrl) {
+            if (metricsBaseUrl == null || metricsBaseUrl.isBlank()) {
+                throw new IllegalArgumentException("metricsBaseUrl must not be null or blank");
+            }
+            this.metricsBaseUrlOverride = metricsBaseUrl.endsWith("/")
+                    ? metricsBaseUrl
+                    : metricsBaseUrl + "/";
+            return this;
+        }
+
+        /** Periodic flush interval for the metrics hook. Falls back to the default if invalid. */
+        public Builder metricsFlushInterval(Duration interval) {
+            if (interval == null || interval.isZero() || interval.isNegative() || interval.toMillis() <= 0) {
+                log.warn("metricsFlushInterval is invalid, using default value");
+                this.metricsFlushInterval = DEFAULT_METRICS_FLUSH_INTERVAL;
+                return this;
+            }
+            this.metricsFlushInterval = interval;
             return this;
         }
 
