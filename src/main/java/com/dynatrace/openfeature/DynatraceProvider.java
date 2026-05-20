@@ -4,6 +4,7 @@ import dev.openfeature.contrib.tools.flagd.api.FlagStoreException;
 import dev.openfeature.contrib.tools.flagd.core.FlagdCore;
 import dev.openfeature.sdk.EvaluationContext;
 import dev.openfeature.sdk.EventProvider;
+import dev.openfeature.sdk.Hook;
 import dev.openfeature.sdk.Metadata;
 import dev.openfeature.sdk.ProviderEvaluation;
 import dev.openfeature.sdk.ProviderEventDetails;
@@ -14,7 +15,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.time.Clock;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -30,7 +33,8 @@ import java.util.regex.Pattern;
  * Dynatrace OpenFeature provider for Java (server-side).
  *
  * <p>Wraps flagd-core for in-process evaluation and adds HTTP config fetching from the
- * Dynatrace CDN with ETag revalidation, polling, retry, and state management.
+ * Dynatrace CDN with ETag revalidation, polling, retry, and state management. Records
+ * evaluation metrics in-process and periodically POSTs them to the Dynatrace metrics endpoint.
  *
  * <p>Usage:
  * <pre>{@code
@@ -55,6 +59,9 @@ public final class DynatraceProvider extends EventProvider {
     static final Pattern KEY_PATTERN = Pattern.compile(
             "^(dt[0-9]{2})\\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$");
 
+    private static final String TEST_ONLY_SDK_KEY =
+            "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5";
+
     private static final Metadata METADATA = () -> PROVIDER_NAME;
 
     private final String cdnUrl;
@@ -62,6 +69,13 @@ public final class DynatraceProvider extends EventProvider {
     private final CdnFetcher fetcher;
     private final Duration pollInterval;
     private final Duration gracePeriod;
+    private final DynatraceMetricsAggregator metricsAggregator;
+    private final EvaluationMetricsFlusher metricsFlusher;
+
+    // Hook is used as a raw type to match OpenFeature's getProviderHooks() contract:
+    //   public List<Hook> getProviderHooks()  // raw on purpose; hooks have heterogeneous T
+    @SuppressWarnings("rawtypes")
+    private final List<Hook> providerHooks;
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
     private final AtomicReference<ProviderState> state = new AtomicReference<>(ProviderState.NOT_READY);
@@ -78,9 +92,7 @@ public final class DynatraceProvider extends EventProvider {
      * @throws IllegalArgumentException if the key is blank or malformed
      */
     public DynatraceProvider(String sdkKey) {
-        this(buildCdnUrl(sdkKey, null), new FlagdCore(),
-                new CdnFetcher(buildCdnUrl(sdkKey, null), buildDefaultHttpClient()),
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+        this(sdkKey, null);
     }
 
     /**
@@ -91,24 +103,58 @@ public final class DynatraceProvider extends EventProvider {
      * @throws IllegalArgumentException if the key is blank or malformed
      */
     public DynatraceProvider(String sdkKey, DynatraceProviderOptions options) {
-        this(buildCdnUrl(sdkKey, options), new FlagdCore(),
-                new CdnFetcher(buildCdnUrl(sdkKey, options), buildDefaultHttpClient()),
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+        this(sdkKey, options, new FlagdCore(), buildDefaultHttpClient());
     }
 
     // for testing
     DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
-        this(cdnUrl, flagdCore, fetcher, POLL_INTERVAL, GRACE_PERIOD);
+        this(TEST_ONLY_SDK_KEY, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
+                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
     }
 
     // for testing
     DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
+        this(TEST_ONLY_SDK_KEY, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
+                pollInterval, gracePeriod);
+    }
+
+    // tests only: lets tests inject every collaborator individually
+    DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
+        this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore,
+                new CdnFetcher(buildCdnUrl(sdkKey, options), httpClient), httpClient,
+                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+    }
+
+    // tests only: as above, plus a pre-built CdnFetcher and timing controls
+    DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
+                      Duration pollInterval, Duration gracePeriod) {
+        this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore, fetcher, buildDefaultHttpClient(),
+                pollInterval, gracePeriod);
+    }
+
+    private DynatraceProvider(String sdkKey, DynatraceProviderOptions options, String cdnUrl,
+                              FlagdCore flagdCore, CdnFetcher fetcher, HttpClient metricsHttpClient,
+                              Duration pollInterval, Duration gracePeriod) {
+        String trimmedSdkKey = validateSdkKey(sdkKey).group(0);
+        DynatraceProviderOptions safeOptions = options == null ? DynatraceProviderOptions.builder().build() : options;
         this.cdnUrl = cdnUrl;
         this.flagdCore = flagdCore;
         this.fetcher = fetcher;
         this.pollInterval = pollInterval;
         this.gracePeriod = gracePeriod;
+        this.metricsAggregator = new DynatraceMetricsAggregator(safeOptions.getMetricsHardCapDistinctFlags());
+        this.metricsFlusher = new EvaluationMetricsFlusher(
+                metricsAggregator,
+                metricsHttpClient,
+                trimmedSdkKey,
+                buildMetricsUrl(trimmedSdkKey, safeOptions),
+                safeOptions.getMetricsFlushInterval(),
+                safeOptions.getMetricsSoftCapDistinctFlags(),
+                resolveSdkVersion(),
+                PROVIDER_NAME);
+        this.providerHooks = Collections.singletonList(
+                new DynatraceMetricsHook(metricsAggregator, Clock.systemUTC(), metricsFlusher::onRecord));
     }
 
     // poll interval must exceed the per-request timeout; otherwise the ticker cancels every
@@ -123,6 +169,27 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     static String buildCdnUrl(String sdkKey, DynatraceProviderOptions options) {
+        Matcher m = validateSdkKey(sdkKey);
+        String trimmed = m.group(0);
+        String type = m.group(2);
+        String geo = m.group(3);
+        java.net.URI override = options != null ? options.getConfigOrigin() : null;
+        String base = override != null
+                ? override.getScheme() + "://" + override.getAuthority() + "/" + type + "/"
+                : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
+        return base + trimmed + ".json";
+    }
+
+    static String buildMetricsUrl(String sdkKey, DynatraceProviderOptions options) {
+        if (options != null && options.getMetricsUrl() != null) {
+            return options.getMetricsUrl();
+        }
+        Matcher m = validateSdkKey(sdkKey);
+        String geo = m.group(3);
+        return "https://metrics." + geo + ".fm.dynatrace.com/v1/metrics";
+    }
+
+    private static Matcher validateSdkKey(String sdkKey) {
         if (sdkKey == null || sdkKey.isBlank()) {
             throw new IllegalArgumentException("key must not be null or blank");
         }
@@ -135,13 +202,7 @@ public final class DynatraceProvider extends EventProvider {
                     "invalid key (public: '" + publicPart + "'); "
                     + "expected dt{NN}.server_{geo}_{rand}.{secret}_{sha}");
         }
-        String type = m.group(2);
-        String geo = m.group(3);
-        java.net.URI override = options != null ? options.getConfigOrigin() : null;
-        String base = override != null
-                ? override.getScheme() + "://" + override.getAuthority() + "/" + type + "/"
-                : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
-        return base + trimmed + ".json";
+        return m;
     }
 
     @Override
@@ -149,8 +210,15 @@ public final class DynatraceProvider extends EventProvider {
         return METADATA;
     }
 
+    @Override
+    @SuppressWarnings("rawtypes")
+    public List<Hook> getProviderHooks() {
+        return providerHooks;
+    }
+
     /**
-     * Fetches the initial configuration from the CDN and starts polling.
+     * Fetches the initial configuration from the CDN, starts polling, and starts the
+     * evaluation-metrics flusher.
      *
      * <p>The SDK calls this before making the provider available. It emits {@code PROVIDER_READY}
      * on success or {@code PROVIDER_ERROR} if this method throws.
@@ -178,6 +246,7 @@ public final class DynatraceProvider extends EventProvider {
 
         try {
             flagdCore.setFlags(body);
+            updateMetricsVersionFromFlagSet();
         } catch (FlagStoreException e) {
             throw new RuntimeException("initial CDN config is invalid: " + e.getMessage(), e);
         }
@@ -201,10 +270,14 @@ public final class DynatraceProvider extends EventProvider {
                 pollInterval);
         pollingManager.start();
 
+        metricsFlusher.start();
         log.info("Dynatrace provider initialized successfully");
     }
 
-    /** Cancels in-flight requests, stops polling, and cleans up. Idempotent. */
+    /**
+     * Performs a final metrics flush, stops polling, cancels in-flight requests, and cleans up.
+     * Idempotent.
+     */
     @Override
     public void shutdown() {
         if (!shutdown.compareAndSet(false, true)) {
@@ -220,17 +293,39 @@ public final class DynatraceProvider extends EventProvider {
         if (gs != null) {
             gs.shutdown();
         }
+        try {
+            metricsFlusher.shutdown();
+        } catch (RuntimeException e) {
+            log.warn("metrics flusher shutdown failed: {}", e.toString());
+        }
         state.set(ProviderState.NOT_READY);
         super.shutdown();
         log.info("Dynatrace provider shut down");
     }
 
 
-    private List<String> storeFlags(String json) {
+    // package-private to let tests drive a config switch without standing up a real PollingManager
+    List<String> storeFlags(String json) {
+        if (shutdown.get()) {
+            throw new IllegalStateException(
+                    "storeFlags called after provider shutdown; ignoring new config");
+        }
+        DynatraceMetricsAggregator.DrainedBatch sealedMetrics = metricsAggregator.drain();
+        metricsFlusher.enqueueSealedBatch(sealedMetrics);
+        metricsFlusher.triggerFlush();
         try {
-            return flagdCore.setFlagsAndGetChangedKeys(json);
+            List<String> changed = flagdCore.setFlagsAndGetChangedKeys(json);
+            updateMetricsVersionFromFlagSet();
+            return changed;
         } catch (FlagStoreException e) {
             throw new RuntimeException("failed to store flag configuration: " + e.getMessage(), e);
+        }
+    }
+
+    private void updateMetricsVersionFromFlagSet() {
+        Object version = flagdCore.getFlagSetMetadata().get("version");
+        if (version instanceof String) {
+            metricsAggregator.setVersion((String) version);
         }
     }
 

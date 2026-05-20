@@ -1,4 +1,11 @@
 {
+  "metadata": {
+    "version": "1741780800",
+    "projectKey": "java-provider-tests",
+    "releaseStageKey": "development",
+    "flagSetId": "java-provider-tests/development",
+    "tenant": "abc12345"
+  },
   "flags": {
     "my-bool-flag": {
       "state": "ENABLED",
