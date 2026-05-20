@@ -234,7 +234,7 @@ final class EvaluationMetricsFlusher {
             if (!delivered) {
                 if (live.getVersion() == null) {
                     try {
-                        aggregator.merge(live.getEvaluations());
+                        aggregator.mergeUnversioned(live);
                     } catch (RuntimeException e) {
                         log.warn("failed to requeue drained metrics batch: {}", e.toString());
                     }
