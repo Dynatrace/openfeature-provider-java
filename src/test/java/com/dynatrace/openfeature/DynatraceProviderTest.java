@@ -75,6 +75,28 @@ class DynatraceProviderTest {
     }
 
     @Test
+    void sdkKeyConstructorCreatesProviderInNotReadyState() {
+        DynatraceProvider p = new DynatraceProvider(TEST_KEY);
+        assertEquals(ProviderState.NOT_READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void nullOptionsIsTreatedAsNoOptions() {
+        DynatraceProvider p = new DynatraceProvider(TEST_KEY, null);
+        assertEquals(ProviderState.NOT_READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void sdkKeyWithOptionsConstructorCreatesProviderInNotReadyState() {
+        DynatraceProvider p = new DynatraceProvider(TEST_KEY,
+                DynatraceProvider.options().cdnBaseUrl(server.url("/server/").toString()).build());
+        assertEquals(ProviderState.NOT_READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
     void initializeFetchesConfigAndResolvesFlagsCorrectly() throws Exception {
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -289,68 +311,59 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void builderRejectsBlankKey() {
-        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder(""));
-        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder(null));
-        assertThrows(IllegalArgumentException.class, () -> DynatraceProviderOptions.builder("   "));
+    void constructorRejectsBlankKey() {
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider(""));
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider((String) null));
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider("   "));
     }
 
     @Test
-    void builderRejectsInvalidKeyFormat() {
+    void constructorRejectsInvalidKeyFormat() {
         // completely invalid
-        assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("notavalidkey"));
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider("notavalidkey"));
         // old format is no longer valid
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
+                new DynatraceProvider("dt_server_us_03ee0ef7cd4244bfb8b71fea8f783f53"));
         // missing private segment
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt01.server_us_abcdef1234"));
+                new DynatraceProvider("dt01.server_us_abcdef1234"));
         // publicRandom too short (< 10 chars)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder("dt01.server_us_abc.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.server_us_abc.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
-    void builderRejectsNonServerType() {
+    void constructorRejectsNonServerType() {
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.web_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.web_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.mobile_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.mobile_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
-    void builderRejectsInvalidGeo() {
+    void constructorRejectsInvalidGeo() {
         // hyphen in geo
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.server_us-east_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.server_us-east_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
         // uppercase geo
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.server_US_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.server_US_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
         // single-char geo (min is 2)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.server_u_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.server_u_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
-    void builderRejectsInvalidPrivateSegment() {
+    void constructorRejectsInvalidPrivateSegment() {
         // secret too short (< 32 hex chars)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.server_us_abcdef1234.abc123_a1b2c3d4e5"));
+                new DynatraceProvider("dt01.server_us_abcdef1234.abc123_a1b2c3d4e5"));
         // missing sha1 (no underscore after secret)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d"));
+                new DynatraceProvider("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d"));
         // sha1 too short (< 10 chars)
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder(
-                        "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_abc12"));
+                new DynatraceProvider("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_abc12"));
     }
 
     @Test

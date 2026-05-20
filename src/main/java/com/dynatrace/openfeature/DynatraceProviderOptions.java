@@ -4,7 +4,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Configuration options for {@link DynatraceProvider}.
+ * Internal configuration holder for {@link DynatraceProvider}. Not part of the public API.
  *
  * <p>Build via {@link #builder(String)}.
  */
