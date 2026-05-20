@@ -75,16 +75,32 @@ final class DynatraceMetricsAggregator {
     }
 
     /**
-     * Restores a previously drained snapshot back into the live map (used by the flusher to
-     * requeue data after a failed POST). Incoming aggregates are copied — never aliased — so
-     * the live map cannot be mutated through any reference still held by the caller.
+     * Restores a previously drained <em>unversioned</em> batch back into the live map so a later
+     * drain can pick it up under the eventual version. Used by the flusher to recover from a
+     * failed POST during the pre-version-observation window.
      *
-     * <p>Merging is intentionally not bounded by {@code hardCapSize}: this path is restoring
-     * previously-accepted data and dropping it would lose committed counts. The hard cap
-     * applies only to <em>new</em> dimensions arriving via {@link #record}.
+     * <p>Versioned batches must <strong>not</strong> be merged: doing so would mix their counts
+     * into whatever version the aggregator subsequently observes, breaking the per-version
+     * batch boundary. Callers that hold a versioned {@link DrainedBatch} after a failed delivery
+     * must keep it as a separate batch (e.g. requeue it in the flusher's sealed-batch queue)
+     * and never call this method with it.
+     *
+     * <p>Incoming aggregates are copied — never aliased — so the live map cannot be mutated
+     * through any reference still held by the caller. Not bounded by {@code hardCapSize}:
+     * this path is restoring previously-accepted data and dropping it would lose committed
+     * counts. The hard cap applies only to <em>new</em> dimensions arriving via {@link #record}.
+     *
+     * @throws IllegalStateException if {@code batch.getVersion() != null}
      */
-    synchronized void merge(Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> snapshot) {
-        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> outer : snapshot.entrySet()) {
+    synchronized void mergeUnversioned(DrainedBatch batch) {
+        if (batch.getVersion() != null) {
+            throw new IllegalStateException(
+                    "cannot merge a versioned batch back into the live aggregator: "
+                            + "doing so would mix version '" + batch.getVersion() + "' counts "
+                            + "into the next observed version. Keep the batch separate instead.");
+        }
+        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> outer
+                : batch.getEvaluations().entrySet()) {
             // Pre-size the inner map so the incoming entries land without a rehash.
             int incomingSize = outer.getValue().size();
             Map<EvaluationMetricKey, EvaluationMetricAggregate> flagEvaluations =

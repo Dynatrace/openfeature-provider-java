@@ -60,11 +60,11 @@ class DynatraceMetricsAggregatorTest {
     }
 
     @Test
-    void metricsAggregatorMergeCopiesAggregatesSoCallerCannotMutateLiveMap() {
+    void mergeUnversionedCopiesAggregatesSoCallerCannotMutateLiveMap() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
         aggregator.record("flag-a", "v1", "static", null, 1741780820);
         DynatraceMetricsAggregator.DrainedBatch batch = aggregator.drain();
-        aggregator.merge(batch.getEvaluations());
+        aggregator.mergeUnversioned(batch);
 
         // Mutate the original aggregate the caller still holds — the live map must not see it.
         EvaluationMetricAggregate original =
@@ -76,6 +76,18 @@ class DynatraceMetricsAggregatorTest {
                 .get(new EvaluationMetricKey("v1", "static", null, 1741780820));
         assertEquals(1L, live.getCount(),
                 "live aggregate must not alias the caller-visible instance");
+    }
+
+    @Test
+    void mergeUnversionedRejectsVersionedBatchToPreservePerVersionBoundary() {
+        // A versioned batch must stay as its own batch so its counts can never be mixed into
+        // whatever version the aggregator observes next.
+        DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("v1");
+        aggregator.record("flag-a", "on", "static", null, 1741780820);
+        DynatraceMetricsAggregator.DrainedBatch versionedBatch = aggregator.drain();
+
+        assertThrows(IllegalStateException.class, () -> aggregator.mergeUnversioned(versionedBatch));
     }
 
     @Test
