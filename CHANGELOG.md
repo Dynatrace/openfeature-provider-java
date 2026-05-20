@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.2.0-alpha...v0.3.0-alpha) (2026-05-20)
+
+
+### ✨ New Features
+
+* fixed-rate polling with in-flight retry cancellation ([#10](https://github.com/Dynatrace/openfeature-provider-java/issues/10)) ([8cd77e7](https://github.com/Dynatrace/openfeature-provider-java/commit/8cd77e7ce7c2c1f4b447feabbe10d91d79d0bd1d))
+
 ## [0.2.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.1.0-alpha...v0.2.0-alpha) (2026-05-13)
 
 
