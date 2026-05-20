@@ -45,8 +45,8 @@ final class CdnFetcher {
     private static final DateTimeFormatter HEADER_DATE_FORMATTER =
             DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ENGLISH);
 
-    /** must be less than the minimum poll interval (10s) to avoid overlapping requests */
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
+    /** bounds how long a single attempt holds the polling worker thread; ensures next-tick cancellation takes effect promptly */
+    static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
     /** default Retry-After duration when 429 has no header */
     private static final long DEFAULT_RETRY_AFTER_MS = 60_000L;
@@ -85,7 +85,10 @@ final class CdnFetcher {
      * <p>If currently rate-limited (429), returns a 429 {@link FetchResult} immediately
      * without making a network request.
      *
-     * <p>Uses {@code tryLock} so that overlapping calls are skipped rather than queued.
+     * <p>Uses {@code tryLock} to serialise concurrent callers. The polling worker is single-threaded,
+     * so back-to-back poll invocations are already sequential. The lock guards against concurrent
+     * calls from other paths (e.g. a future SSE-triggered re-fetch on a different thread) racing
+     * the in-progress fetch's {@code state} mutation.
      *
      * @return {@link FetchResult}; body is null on 304, 429, or on a stale-node response
      * @throws IOException on network failure after all retry attempts exhausted
