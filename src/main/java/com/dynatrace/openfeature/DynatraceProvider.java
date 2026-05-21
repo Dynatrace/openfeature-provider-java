@@ -23,6 +23,8 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Dynatrace OpenFeature provider for Java (server-side).
@@ -49,9 +51,13 @@ public final class DynatraceProvider extends EventProvider {
     static final Duration POLL_INTERVAL = Duration.ofSeconds(10);
     static final Duration GRACE_PERIOD = Duration.ofMinutes(1);
 
+    /** SDK key format: {token}.server_{geo}_{publicRandom}.{secret}_{sha1} */
+    static final Pattern KEY_PATTERN = Pattern.compile(
+            "^(dt[0-9]{2})\\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$");
+
     private static final Metadata METADATA = () -> PROVIDER_NAME;
 
-    private final DynatraceProviderOptions options;
+    private final String cdnUrl;
     private final FlagdCore flagdCore;
     private final CdnFetcher fetcher;
     private final Duration pollInterval;
@@ -72,7 +78,9 @@ public final class DynatraceProvider extends EventProvider {
      * @throws IllegalArgumentException if the key is blank or malformed
      */
     public DynatraceProvider(String sdkKey) {
-        this(DynatraceProviderOptions.parse(sdkKey, null));
+        this(buildCdnUrl(sdkKey, null), new FlagdCore(),
+                new CdnFetcher(buildCdnUrl(sdkKey, null), buildDefaultHttpClient()),
+                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
     }
 
     /**
@@ -83,12 +91,24 @@ public final class DynatraceProvider extends EventProvider {
      * @throws IllegalArgumentException if the key is blank or malformed
      */
     public DynatraceProvider(String sdkKey, DynatraceProviderOptions options) {
-        this(DynatraceProviderOptions.parse(sdkKey, options));
+        this(buildCdnUrl(sdkKey, options), new FlagdCore(),
+                new CdnFetcher(buildCdnUrl(sdkKey, options), buildDefaultHttpClient()),
+                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
     }
 
-    DynatraceProvider(DynatraceProviderOptions options) {
-        this(options, new FlagdCore(), new CdnFetcher(options.getCdnUrl(), buildDefaultHttpClient()),
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+    // for testing
+    DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
+        this(cdnUrl, flagdCore, fetcher, POLL_INTERVAL, GRACE_PERIOD);
+    }
+
+    // for testing
+    DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
+                      Duration pollInterval, Duration gracePeriod) {
+        this.cdnUrl = cdnUrl;
+        this.flagdCore = flagdCore;
+        this.fetcher = fetcher;
+        this.pollInterval = pollInterval;
+        this.gracePeriod = gracePeriod;
     }
 
     // poll interval must exceed the per-request timeout; otherwise the ticker cancels every
@@ -102,24 +122,24 @@ public final class DynatraceProvider extends EventProvider {
         return pollInterval;
     }
 
-    // for testing
-    DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
-        this(options, flagdCore, new CdnFetcher(options.getCdnUrl(), httpClient));
-    }
-
-    // for testing
-    DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher) {
-        this(options, flagdCore, fetcher, POLL_INTERVAL, GRACE_PERIOD);
-    }
-
-    // for testing
-    DynatraceProvider(DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
-                      Duration pollInterval, Duration gracePeriod) {
-        this.options = options;
-        this.flagdCore = flagdCore;
-        this.fetcher = fetcher;
-        this.pollInterval = pollInterval;
-        this.gracePeriod = gracePeriod;
+    static String buildCdnUrl(String sdkKey, DynatraceProviderOptions options) {
+        if (sdkKey == null || sdkKey.isBlank()) {
+            throw new IllegalArgumentException("key must not be null or blank");
+        }
+        String trimmed = sdkKey.strip();
+        Matcher m = KEY_PATTERN.matcher(trimmed);
+        if (!m.matches()) {
+            int lastDot = trimmed.lastIndexOf('.');
+            String publicPart = lastDot > 0 ? trimmed.substring(0, lastDot) : "<redacted>";
+            throw new IllegalArgumentException(
+                    "invalid key format (public: '" + publicPart + "'); "
+                    + "expected dt{NN}.server_{geo}_{rand}.{secret}_{sha}");
+        }
+        String type = m.group(2);
+        String geo = m.group(3);
+        String override = options != null ? options.getCdnBaseUrl() : null;
+        String base = override != null ? override : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
+        return base + trimmed + ".json";
     }
 
     @Override
@@ -135,7 +155,7 @@ public final class DynatraceProvider extends EventProvider {
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
-        String host = java.net.URI.create(options.getCdnUrl()).getHost();
+        String host = java.net.URI.create(cdnUrl).getHost();
         log.info("initializing Dynatrace feature flag provider (host={})", host);
 
         FetchResult result;

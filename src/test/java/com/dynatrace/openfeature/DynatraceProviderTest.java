@@ -43,16 +43,13 @@ class DynatraceProviderTest {
         server.shutdown();
     }
 
-    private DynatraceProviderOptions options() {
-        return DynatraceProviderOptions.builder()
-                .cdnBaseUrl(server.url("/server/").toString())
-                .build();
+    private String mockCdnUrl() {
+        return server.url("/server/").toString() + TEST_KEY + ".json";
     }
 
     private DynatraceProvider provider() {
-        DynatraceProviderOptions opts = DynatraceProviderOptions.parse(TEST_KEY, options());
-        CdnFetcher fetcher = new CdnFetcher(opts.getCdnUrl(), httpClient, NO_DELAY_RETRY);
-        return new DynatraceProvider(opts, new FlagdCore(), fetcher);
+        CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
+        return new DynatraceProvider(mockCdnUrl(), new FlagdCore(), fetcher);
     }
 
     /** provider with short poll interval and grace period for state management tests */
@@ -61,9 +58,8 @@ class DynatraceProviderTest {
     }
 
     private DynatraceProvider fastProvider(Duration gracePeriod) {
-        DynatraceProviderOptions opts = DynatraceProviderOptions.parse(TEST_KEY, options());
-        CdnFetcher fetcher = new CdnFetcher(opts.getCdnUrl(), httpClient, NO_DELAY_RETRY);
-        return new DynatraceProvider(opts, new FlagdCore(), fetcher,
+        CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
+        return new DynatraceProvider(mockCdnUrl(), new FlagdCore(), fetcher,
                 Duration.ofMillis(50), gracePeriod);
     }
 
@@ -91,7 +87,7 @@ class DynatraceProviderTest {
     @Test
     void sdkKeyWithOptionsConstructorCreatesProviderInNotReadyState() {
         DynatraceProvider p = new DynatraceProvider(TEST_KEY,
-                DynatraceProviderOptions.builder().cdnBaseUrl(server.url("/server/").toString()).build());
+                DynatraceProviderOptions.builder().cdnBaseUrl("https://my-proxy.example.com").build());
         assertEquals(ProviderState.NOT_READY, p.getState());
         p.shutdown();
     }
@@ -270,41 +266,32 @@ class DynatraceProviderTest {
 
     @Test
     void cdnUrlDerivedFromKey() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.parse(
-                "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null);
         assertEquals(
                 "https://cdn.us.fm.dynatrace.com/server/"
                         + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json",
-                options.getCdnUrl());
+                DynatraceProvider.buildCdnUrl(
+                        "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null));
     }
 
     @Test
     void cdnUrlUsesGeoFromKey() {
-        DynatraceProviderOptions eu = DynatraceProviderOptions.parse(
-                "dt01.server_eu_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null);
-        assertTrue(eu.getCdnUrl().contains("cdn.eu.fm.dynatrace.com/server/"));
+        assertTrue(DynatraceProvider.buildCdnUrl(
+                "dt01.server_eu_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null)
+                .contains("cdn.eu.fm.dynatrace.com/server/"));
     }
 
     @Test
     void builderAcceptsArbitraryAlphabeticGeo() {
-        DynatraceProviderOptions de = DynatraceProviderOptions.parse(
-                "dt01.server_de_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null);
-        assertTrue(de.getCdnUrl().contains("cdn.de.fm.dynatrace.com"));
+        assertTrue(DynatraceProvider.buildCdnUrl(
+                "dt01.server_de_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null)
+                .contains("cdn.de.fm.dynatrace.com"));
     }
 
     @Test
-    void parseTrimsWhitespaceFromKey() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.parse(
-                "  dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5  ", null);
-        assertEquals(
-                "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5",
-                options.getKey());
-    }
-
-    @Test
-    void publicKeyExposesOnlyPublicSegment() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.parse(TEST_KEY, null);
-        assertEquals("dt01.server_us_abcdef1234", options.getPublicKey());
+    void buildCdnUrlTrimsWhitespaceFromKey() {
+        assertTrue(DynatraceProvider.buildCdnUrl(
+                "  dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5  ", null)
+                .contains("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5"));
     }
 
     @Test
@@ -365,12 +352,11 @@ class DynatraceProviderTest {
 
     @Test
     void cdnBaseUrlWithoutTrailingSlashIsAutoAppended() {
-        DynatraceProviderOptions options = DynatraceProviderOptions.parse(TEST_KEY,
-                DynatraceProviderOptions.builder().cdnBaseUrl("https://cdn.example.com/server").build());
         assertEquals(
                 "https://cdn.example.com/server/"
                         + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json",
-                options.getCdnUrl());
+                DynatraceProvider.buildCdnUrl(TEST_KEY,
+                        DynatraceProviderOptions.builder().cdnBaseUrl("https://cdn.example.com/server").build()));
     }
 
     @Test
