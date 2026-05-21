@@ -1,5 +1,6 @@
 package com.dynatrace.openfeature;
 
+import dev.openfeature.contrib.tools.flagd.core.FlagdCore;
 import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.ImmutableContext;
 import dev.openfeature.sdk.ProviderEvaluation;
@@ -11,6 +12,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.http.HttpClient;
+import java.time.Duration;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -21,11 +25,17 @@ class DynatraceProviderTest {
     private static final String FLAG_CONFIG = TestFixtures.FLAG_CONFIG;
 
     private MockWebServer server;
+    private HttpClient httpClient;
+
+    /** no-sleep retry strategy for fast tests */
+    private static final RetryStrategy NO_DELAY_RETRY =
+            new RetryStrategy(new Random(42), ms -> {});
 
     @BeforeEach
     void setUp() throws IOException {
         server = new MockWebServer();
         server.start();
+        httpClient = HttpClient.newHttpClient();
     }
 
     @AfterEach
@@ -33,9 +43,24 @@ class DynatraceProviderTest {
         server.shutdown();
     }
 
+    private String mockCdnUrl() {
+        return server.url("/server/").toString() + TEST_KEY + ".json";
+    }
+
     private DynatraceProvider provider() {
         return new DynatraceProvider(TEST_KEY,
                 DynatraceProviderOptions.builder().cdnBaseUrl(server.url("/server/").toString()).build());
+    }
+
+    /** provider with short poll interval and grace period for state management tests */
+    private DynatraceProvider fastProvider() {
+        return fastProvider(Duration.ofMillis(200));
+    }
+
+    private DynatraceProvider fastProvider(Duration gracePeriod) {
+        CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
+        return new DynatraceProvider(mockCdnUrl(), new FlagdCore(), fetcher,
+                Duration.ofMillis(50), gracePeriod);
     }
 
     @Test
@@ -162,6 +187,55 @@ class DynatraceProviderTest {
     void stateIsNotReadyBeforeInitialize() {
         DynatraceProvider p = provider();
         assertEquals(ProviderState.NOT_READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void pollFailureTransitionsToStale() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+
+        Thread.sleep(300);
+
+        assertEquals(ProviderState.STALE, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void gracePeriodExpiryTransitionsToError() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS * 10; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        DynatraceProvider p = fastProvider();
+        p.initialize(new ImmutableContext());
+
+        Thread.sleep(600);
+
+        assertEquals(ProviderState.ERROR, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void recoveryFromStaleToReady() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = fastProvider();
+        p.initialize(new ImmutableContext());
+
+        Thread.sleep(400);
+
+        assertEquals(ProviderState.READY, p.getState());
         p.shutdown();
     }
 
