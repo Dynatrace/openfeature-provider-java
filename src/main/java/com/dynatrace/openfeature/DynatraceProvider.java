@@ -38,48 +38,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * // with proxy override
  * OpenFeatureAPI.getInstance().setProvider(
  *     new DynatraceProvider("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5",
- *         DynatraceProvider.options().cdnBaseUrl("https://my-proxy.example.com").build()));
+ *         DynatraceProviderOptions.builder().cdnBaseUrl("https://my-proxy.example.com").build()));
  * }</pre>
  */
 public final class DynatraceProvider extends EventProvider {
-
-    /**
-     * Optional configuration for {@link DynatraceProvider}. Build via {@link DynatraceProvider#options()}.
-     */
-    public static final class Options {
-
-        private final String cdnBaseUrl;
-
-        private Options(Builder builder) {
-            this.cdnBaseUrl = builder.cdnBaseUrl;
-        }
-
-        String getCdnBaseUrl() {
-            return cdnBaseUrl;
-        }
-
-        public static final class Builder {
-            private String cdnBaseUrl;
-
-            /**
-             * Override the config origin (e.g. a local proxy or lower environment).
-             * Production origin is derived automatically from the key.
-             */
-            public Builder cdnBaseUrl(String cdnBaseUrl) {
-                this.cdnBaseUrl = cdnBaseUrl;
-                return this;
-            }
-
-            public Options build() {
-                return new Options(this);
-            }
-        }
-    }
-
-    /** Returns a builder for optional provider configuration. */
-    public static Options.Builder options() {
-        return new Options.Builder();
-    }
 
     private static final Logger log = LoggerFactory.getLogger(DynatraceProvider.class);
 
@@ -110,26 +72,18 @@ public final class DynatraceProvider extends EventProvider {
      * @throws IllegalArgumentException if the key is blank or malformed
      */
     public DynatraceProvider(String sdkKey) {
-        this(sdkKey, options().build());
+        this(DynatraceProviderOptions.parse(sdkKey, null));
     }
 
     /**
      * Creates a provider from the SDK key with additional options.
      *
      * @param sdkKey   SDK key in the format {@code dt{NN}.server_{geo}_{rand}.{secret}_{sha}}
-     * @param options  optional configuration (e.g. CDN base URL override for dev/labs)
+     * @param options  optional configuration (e.g. proxy base URL override)
      * @throws IllegalArgumentException if the key is blank or malformed
      */
-    public DynatraceProvider(String sdkKey, Options options) {
-        this(toInternalOptions(sdkKey, options));
-    }
-
-    private static DynatraceProviderOptions toInternalOptions(String sdkKey, Options options) {
-        DynatraceProviderOptions.Builder b = DynatraceProviderOptions.builder(sdkKey);
-        if (options != null && options.getCdnBaseUrl() != null) {
-            b.cdnBaseUrl(options.getCdnBaseUrl());
-        }
-        return b.build();
+    public DynatraceProvider(String sdkKey, DynatraceProviderOptions options) {
+        this(DynatraceProviderOptions.parse(sdkKey, options));
     }
 
     DynatraceProvider(DynatraceProviderOptions options) {
