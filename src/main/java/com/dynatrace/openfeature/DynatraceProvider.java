@@ -96,14 +96,8 @@ public final class DynatraceProvider extends EventProvider {
                 validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
     }
 
-    // for testing
-    DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
-        this(cdnUrl, flagdCore, fetcher, POLL_INTERVAL, GRACE_PERIOD);
-    }
-
-    // for testing
-    DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
-                      Duration pollInterval, Duration gracePeriod) {
+    private DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
+                              Duration pollInterval, Duration gracePeriod) {
         this.cdnUrl = cdnUrl;
         this.flagdCore = flagdCore;
         this.fetcher = fetcher;
