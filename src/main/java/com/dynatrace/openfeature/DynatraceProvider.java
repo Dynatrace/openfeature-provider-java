@@ -40,7 +40,7 @@ import java.util.regex.Pattern;
  * // with proxy override
  * OpenFeatureAPI.getInstance().setProvider(
  *     new DynatraceProvider("dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5",
- *         DynatraceProviderOptions.builder().cdnBaseUrl("https://my-proxy.example.com").build()));
+ *         DynatraceProviderOptions.builder().configOrigin("https://my-proxy.example.com").build()));
  * }</pre>
  */
 public final class DynatraceProvider extends EventProvider {
@@ -137,8 +137,10 @@ public final class DynatraceProvider extends EventProvider {
         }
         String type = m.group(2);
         String geo = m.group(3);
-        String override = options != null ? options.getCdnBaseUrl() : null;
-        String base = override != null ? override : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
+        String override = options != null ? options.getConfigOrigin() : null;
+        String base = override != null
+                ? override.replaceAll("/+$", "") + "/" + type + "/"
+                : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
         return base + trimmed + ".json";
     }
 
