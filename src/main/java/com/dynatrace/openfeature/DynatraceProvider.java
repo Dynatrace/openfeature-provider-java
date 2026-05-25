@@ -137,9 +137,9 @@ public final class DynatraceProvider extends EventProvider {
         }
         String type = m.group(2);
         String geo = m.group(3);
-        String override = options != null ? options.getConfigOrigin() : null;
+        java.net.URI override = options != null ? options.getConfigOrigin() : null;
         String base = override != null
-                ? override.replaceAll("/+$", "") + "/" + type + "/"
+                ? override.getScheme() + "://" + override.getAuthority() + "/" + type + "/"
                 : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
         return base + trimmed + ".json";
     }

@@ -10,13 +10,13 @@ import java.net.URISyntaxException;
  */
 public final class DynatraceProviderOptions {
 
-    private final String configOrigin;
+    private final URI configOrigin;
 
     private DynatraceProviderOptions(Builder builder) {
         this.configOrigin = builder.configOrigin;
     }
 
-    String getConfigOrigin() {
+    URI getConfigOrigin() {
         return configOrigin;
     }
 
@@ -26,7 +26,7 @@ public final class DynatraceProviderOptions {
 
     public static final class Builder {
 
-        String configOrigin = null;
+        URI configOrigin = null;
 
         /**
          * Override the config origin (scheme, host, and port — no path).
@@ -45,10 +45,10 @@ public final class DynatraceProviderOptions {
                     throw new IllegalArgumentException(
                             "configOrigin must not include a path; got: \"" + stripped + "\"");
                 }
+                this.configOrigin = uri;
             } catch (URISyntaxException e) {
                 throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
             }
-            this.configOrigin = stripped;
             return this;
         }
 
