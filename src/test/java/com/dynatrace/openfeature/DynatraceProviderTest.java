@@ -359,6 +359,14 @@ class DynatraceProviderTest {
     }
 
     @Test
+    void builderRejectsConfigOriginWithPath() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/server"));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/server/path"));
+    }
+
+    @Test
     void shutdownBeforeInitializeIsSafe() {
         DynatraceProvider p = provider();
         assertDoesNotThrow(p::shutdown);

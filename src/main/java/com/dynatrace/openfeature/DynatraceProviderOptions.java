@@ -1,5 +1,8 @@
 package com.dynatrace.openfeature;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+
 /**
  * Optional configuration for {@link DynatraceProvider}.
  *
@@ -34,7 +37,18 @@ public final class DynatraceProviderOptions {
             if (configOrigin == null || configOrigin.isBlank()) {
                 throw new IllegalArgumentException("configOrigin must not be null or blank");
             }
-            this.configOrigin = configOrigin.strip();
+            String stripped = configOrigin.strip();
+            try {
+                URI uri = new URI(stripped);
+                String path = uri.getPath();
+                if (path != null && !path.isEmpty() && !path.equals("/")) {
+                    throw new IllegalArgumentException(
+                            "configOrigin must not include a path; got: \"" + stripped + "\"");
+                }
+            } catch (URISyntaxException e) {
+                throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
+            }
+            this.configOrigin = stripped;
             return this;
         }
 
