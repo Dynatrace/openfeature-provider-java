@@ -132,7 +132,7 @@ public final class DynatraceProvider extends EventProvider {
             int lastDot = trimmed.lastIndexOf('.');
             String publicPart = lastDot > 0 ? trimmed.substring(0, lastDot) : "<redacted>";
             throw new IllegalArgumentException(
-                    "invalid key format (public: '" + publicPart + "'); "
+                    "invalid key (public: '" + publicPart + "'); "
                     + "expected dt{NN}.server_{geo}_{rand}.{secret}_{sha}");
         }
         String type = m.group(2);
