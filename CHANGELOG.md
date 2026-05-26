@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.3.0-alpha...v0.4.0-alpha) (2026-05-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* accept SDK key as first constructor argument ([#13](https://github.com/Dynatrace/openfeature-provider-java/issues/13))
+
+### ✨ New Features
+
+* accept SDK key as first constructor argument ([#13](https://github.com/Dynatrace/openfeature-provider-java/issues/13)) ([65f7e18](https://github.com/Dynatrace/openfeature-provider-java/commit/65f7e18a534d8e33ca04f340ad691ad195919165))
+
 ## [0.3.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.2.0-alpha...v0.3.0-alpha) (2026-05-20)
 
 
