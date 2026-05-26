@@ -48,8 +48,9 @@ class DynatraceProviderTest {
     }
 
     private DynatraceProvider provider() {
+        String origin = server.url("/").toString().replaceAll("/+$", "");
         return new DynatraceProvider(TEST_KEY,
-                DynatraceProviderOptions.builder().cdnBaseUrl(server.url("/server/").toString()).build());
+                DynatraceProviderOptions.builder().configOrigin(origin).build());
     }
 
     /** provider with short poll interval and grace period for state management tests */
@@ -87,7 +88,7 @@ class DynatraceProviderTest {
     @Test
     void sdkKeyWithOptionsConstructorCreatesProviderInNotReadyState() {
         DynatraceProvider p = new DynatraceProvider(TEST_KEY,
-                DynatraceProviderOptions.builder().cdnBaseUrl("https://my-proxy.example.com").build());
+                DynatraceProviderOptions.builder().configOrigin("https://my-proxy.example.com").build());
         assertEquals(ProviderState.NOT_READY, p.getState());
         p.shutdown();
     }
@@ -340,20 +341,29 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void cdnBaseUrlWithoutTrailingSlashIsAutoAppended() {
-        assertEquals(
-                "https://cdn.example.com/server/"
-                        + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json",
-                DynatraceProvider.buildCdnUrl(TEST_KEY,
-                        DynatraceProviderOptions.builder().cdnBaseUrl("https://cdn.example.com/server").build()));
+    void configOriginTrailingSlashIsNormalised() {
+        String expected = "https://cdn.example.com/server/"
+                + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json";
+        assertEquals(expected, DynatraceProvider.buildCdnUrl(TEST_KEY,
+                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/").build()));
+        assertEquals(expected, DynatraceProvider.buildCdnUrl(TEST_KEY,
+                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com").build()));
     }
 
     @Test
-    void builderRejectsBlankCdnBaseUrl() {
+    void builderRejectsBlankConfigOrigin() {
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder().cdnBaseUrl(""));
+                DynatraceProviderOptions.builder().configOrigin(""));
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder().cdnBaseUrl(null));
+                DynatraceProviderOptions.builder().configOrigin(null));
+    }
+
+    @Test
+    void builderRejectsConfigOriginWithPath() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/server"));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/server/path"));
     }
 
     @Test

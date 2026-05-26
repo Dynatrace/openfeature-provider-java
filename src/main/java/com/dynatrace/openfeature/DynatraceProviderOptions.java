@@ -1,5 +1,8 @@
 package com.dynatrace.openfeature;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+
 /**
  * Optional configuration for {@link DynatraceProvider}.
  *
@@ -7,14 +10,14 @@ package com.dynatrace.openfeature;
  */
 public final class DynatraceProviderOptions {
 
-    private final String cdnBaseUrl;
+    private final URI configOrigin;
 
     private DynatraceProviderOptions(Builder builder) {
-        this.cdnBaseUrl = builder.cdnBaseUrl;
+        this.configOrigin = builder.configOrigin;
     }
 
-    String getCdnBaseUrl() {
-        return cdnBaseUrl;
+    URI getConfigOrigin() {
+        return configOrigin;
     }
 
     public static Builder builder() {
@@ -23,18 +26,29 @@ public final class DynatraceProviderOptions {
 
     public static final class Builder {
 
-        String cdnBaseUrl = null;
+        URI configOrigin = null;
 
         /**
-         * Override the config origin (e.g. a local proxy or lower environment).
-         * A trailing {@code /} is auto-appended if missing.
-         * Production origin is derived automatically from the SDK key.
+         * Override the config origin (scheme, host, and port — no path).
+         * For dev/labs environments (e.g. {@code https://cdn.eu.fm.dynatracelabs.com}).
+         * Production URL is derived automatically from the SDK key.
          */
-        public Builder cdnBaseUrl(String cdnBaseUrl) {
-            if (cdnBaseUrl == null || cdnBaseUrl.isBlank()) {
-                throw new IllegalArgumentException("cdnBaseUrl must not be null or blank");
+        public Builder configOrigin(String configOrigin) {
+            if (configOrigin == null || configOrigin.isBlank()) {
+                throw new IllegalArgumentException("configOrigin must not be null or blank");
             }
-            this.cdnBaseUrl = cdnBaseUrl.endsWith("/") ? cdnBaseUrl : cdnBaseUrl + "/";
+            String stripped = configOrigin.strip();
+            try {
+                URI uri = new URI(stripped);
+                String path = uri.getPath();
+                if (path != null && !path.isEmpty() && !path.equals("/")) {
+                    throw new IllegalArgumentException(
+                            "configOrigin must not include a path; got: \"" + stripped + "\"");
+                }
+                this.configOrigin = uri;
+            } catch (URISyntaxException e) {
+                throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
+            }
             return this;
         }
 
