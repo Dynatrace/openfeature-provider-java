@@ -9,7 +9,9 @@
             "prerelease-type": "alpha",
             "extra-files": [
                 "pom.xml"
-            ]
+            ],
+            "bump-minor-pre-major": true,
+            "bump-patch-for-minor-pre-major": true
         }
     },
     "changelog-sections": [
