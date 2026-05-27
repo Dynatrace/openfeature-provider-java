@@ -7,7 +7,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -82,7 +81,7 @@ class EvaluationMetricsFlusherTest {
                     aggregator,
                     httpClient,
                     TEST_KEY,
-                    metricsServer.url("/").toString(),
+                    metricsServer.url("/v1/metrics").toString(),
                     Duration.ofMinutes(5),
                     1_000,
                     "1.2.3",
@@ -104,6 +103,33 @@ class EvaluationMetricsFlusherTest {
     }
 
     @Test
+    void flusherPostsToConfiguredMetricsUrlExactly() throws Exception {
+        try (MockWebServer metricsServer = new MockWebServer()) {
+            metricsServer.start();
+            metricsServer.enqueue(new MockResponse().setResponseCode(202));
+
+            DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+            aggregator.setVersion("1741780800");
+            aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820L);
+            EvaluationMetricsFlusher flusher = new EvaluationMetricsFlusher(
+                    aggregator,
+                    httpClient,
+                    TEST_KEY,
+                    metricsServer.url("/custom/metrics").toString(),
+                    Duration.ofMinutes(5),
+                    1_000,
+                    "1.2.3",
+                    "dynatrace");
+
+            flusher.shutdown();
+
+            RecordedRequest req = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(req, "expected HTTP POST during shutdown");
+            assertEquals("/custom/metrics", req.getPath());
+        }
+    }
+
+    @Test
     void evaluationMetricsFlusherRequeuesBatchWhenNoVersionAvailable() throws Exception {
         try (MockWebServer metricsServer = new MockWebServer()) {
             metricsServer.start();
@@ -115,7 +141,7 @@ class EvaluationMetricsFlusherTest {
                     aggregator,
                     httpClient,
                     TEST_KEY,
-                    metricsServer.url("/").toString(),
+                    metricsServer.url("/v1/metrics").toString(),
                     Duration.ofMinutes(5),
                     1_000,
                     "1.2.3",
@@ -144,7 +170,7 @@ class EvaluationMetricsFlusherTest {
                     aggregator,
                     httpClient,
                     TEST_KEY,
-                    metricsServer.url("/").toString(),
+                    metricsServer.url("/v1/metrics").toString(),
                     Duration.ofMinutes(5),
                     1,
                     "1.2.3",
@@ -188,7 +214,7 @@ class EvaluationMetricsFlusherTest {
                     aggregator,
                     httpClient,
                     TEST_KEY,
-                    metricsServer.url("/").toString(),
+                    metricsServer.url("/v1/metrics").toString(),
                     Duration.ofMinutes(5),
                     1,
                     "1.2.3",
@@ -238,7 +264,7 @@ class EvaluationMetricsFlusherTest {
                 aggregator,
                 throwingClient,
                 TEST_KEY,
-                "https://example.invalid/",
+                "https://example.invalid/v1/metrics",
                 Duration.ofMinutes(5),
                 1_000,
                 "1.2.3",
@@ -262,7 +288,7 @@ class EvaluationMetricsFlusherTest {
                     aggregator,
                     httpClient,
                     TEST_KEY,
-                    metricsServer.url("/").toString(),
+                    metricsServer.url("/v1/metrics").toString(),
                     Duration.ofMinutes(5),
                     1,
                     "1.2.3",

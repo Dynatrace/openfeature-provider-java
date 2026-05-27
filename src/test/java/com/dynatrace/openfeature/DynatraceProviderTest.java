@@ -275,6 +275,40 @@ class DynatraceProviderTest {
     }
 
     @Test
+    void metricsUrlDerivedFromKey() {
+        // Geo segment in the key controls the metrics-endpoint hostname.
+        assertEquals("https://metrics.eu.fm.dynatrace.com/v1/metrics",
+                DynatraceProvider.buildMetricsUrl(
+                        "dt01.server_eu_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5", null));
+    }
+
+    @Test
+    void metricsUrlOverrideUsesFullEndpoint() {
+        DynatraceProviderOptions options = DynatraceProviderOptions.builder()
+                .metricsUrl("https://metrics.example.com/custom/metrics")
+                .build();
+        assertEquals("https://metrics.example.com/custom/metrics",
+                DynatraceProvider.buildMetricsUrl(TEST_KEY, options));
+    }
+
+    @Test
+    void metricsUrlOverrideTrimsWhitespace() {
+        DynatraceProviderOptions options = DynatraceProviderOptions.builder()
+                .metricsUrl("  https://metrics.example.com/v1/metrics  ")
+                .build();
+        assertEquals("https://metrics.example.com/v1/metrics",
+                DynatraceProvider.buildMetricsUrl(TEST_KEY, options));
+    }
+
+    @Test
+    void builderRejectsBlankMetricsUrl() {
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().metricsUrl(""));
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().metricsUrl(null));
+    }
+
+    @Test
     void initializeFetchesConfigAndResolvesFlagsCorrectly() throws Exception {
         server.enqueue(new MockResponse()
                 .setResponseCode(200)

@@ -21,8 +21,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Scheduled flusher that drains the {@link DynatraceMetricsAggregator}, serializes the
- * documented Dynatrace evaluation-metrics payload, and POSTs it to the configured Cloudflare
- * Worker URL.
+ * documented Dynatrace evaluation-metrics payload, and POSTs it to the configured metrics
+ * ingest endpoint.
  *
  * <p>Server-SDK flush triggers (per the evaluation-metrics scoping doc):
  * <ul>
@@ -40,7 +40,6 @@ final class EvaluationMetricsFlusher {
 
     private static final Logger log = LoggerFactory.getLogger(EvaluationMetricsFlusher.class);
 
-    static final String METRICS_ENDPOINT = "v1/metrics";
     static final String AUTHORIZATION_HEADER = "Authorization";
     static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
 
@@ -77,14 +76,14 @@ final class EvaluationMetricsFlusher {
             DynatraceMetricsAggregator aggregator,
             HttpClient httpClient,
             String sdkKey,
-            String url,
+            String metricsUrl,
             Duration flushInterval,
             int capacityThreshold,
             String sdkVersion,
             String providerName) {
         this.aggregator = aggregator;
         this.httpClient = httpClient;
-        this.metricsUri = URI.create(url + METRICS_ENDPOINT);
+        this.metricsUri = URI.create(metricsUrl);
         this.authorizationHeader = "Bearer " + sdkKey;
         this.flushInterval = flushInterval;
         this.capacityThreshold = capacityThreshold;
