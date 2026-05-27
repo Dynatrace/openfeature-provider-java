@@ -82,6 +82,54 @@ class DynatraceMetricsHookTest {
     }
 
     @Test
+    void metricsHookUsesDefaultSentinelForDefaultReason() {
+        DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        DynatraceMetricsHook hook = new DynatraceMetricsHook(
+                aggregator,
+                Clock.fixed(Instant.ofEpochSecond(1741780829), ZoneOffset.UTC));
+        HookContext<Object> ctx = booleanHookContext("fallback-flag");
+        FlagEvaluationDetails<Object> details = FlagEvaluationDetails.<Object>builder()
+                .flagKey("fallback-flag")
+                .variant("off")
+                .reason("DEFAULT")
+                .build();
+
+        hook.finallyAfter(ctx, details, Collections.emptyMap());
+
+        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+                .get("fallback-flag")
+                .get(new EvaluationMetricKey("__default__", "default", null, 1741780820));
+        assertNotNull(aggregate);
+        assertEquals("__default__", aggregate.getVariant());
+        assertEquals("default", aggregate.getReason());
+    }
+
+    @Test
+    void metricsHookForcesErrorReasonAndDefaultSentinelForErrors() {
+        DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        DynatraceMetricsHook hook = new DynatraceMetricsHook(
+                aggregator,
+                Clock.fixed(Instant.ofEpochSecond(1741780829), ZoneOffset.UTC));
+        HookContext<Object> ctx = booleanHookContext("mismatched-type");
+        FlagEvaluationDetails<Object> details = FlagEvaluationDetails.<Object>builder()
+                .flagKey("mismatched-type")
+                .variant("on")
+                .reason("TARGETING_MATCH")
+                .errorCode(ErrorCode.TYPE_MISMATCH)
+                .build();
+
+        hook.finallyAfter(ctx, details, Collections.emptyMap());
+
+        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+                .get("mismatched-type")
+                .get(new EvaluationMetricKey("__default__", "error", "type_mismatch", 1741780820));
+        assertNotNull(aggregate);
+        assertEquals("__default__", aggregate.getVariant());
+        assertEquals("error", aggregate.getReason());
+        assertEquals("type_mismatch", aggregate.getErrorCode());
+    }
+
+    @Test
     void metricsHookCapturesConfigVersionFromFlagMetadata() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
         DynatraceMetricsHook hook = new DynatraceMetricsHook(

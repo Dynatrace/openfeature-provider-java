@@ -4,6 +4,7 @@ import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.Hook;
 import dev.openfeature.sdk.HookContext;
 import dev.openfeature.sdk.ImmutableMetadata;
+import dev.openfeature.sdk.Reason;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,8 +21,8 @@ import java.util.Map;
  * <ul>
  *   <li>per-record dimensions: {@code flagKey}, {@code variant}, {@code reason}, {@code errorCode}</li>
  *   <li>10-second epoch bucket via {@code Math.floorDiv(epochSec, 10) * 10}</li>
- *   <li>{@code __default__} sentinel applied when the resolver does not return a variant
- *       (typically on errors)</li>
+ *   <li>{@code __default__} sentinel applied for code-default and error evaluations, or when
+ *       the resolver does not return a variant</li>
  *   <li>error codes and reasons normalized to lowercase to match the line protocol</li>
  *   <li>config {@code version} read from flagd's per-evaluation {@code metadata.version}
  *       and stored on the aggregator as a batch-level property</li>
@@ -32,8 +33,9 @@ final class DynatraceMetricsHook implements Hook<Object> {
     private static final Logger log = LoggerFactory.getLogger(DynatraceMetricsHook.class);
 
     static final String DEFAULT_VARIANT = "__default__";
-    static final String UNKNOWN_REASON = "unknown";
-    static final String ERROR_REASON = "error";
+    static final String DEFAULT_REASON = Reason.DEFAULT.name().toLowerCase(Locale.ROOT);
+    static final String UNKNOWN_REASON = Reason.UNKNOWN.name().toLowerCase(Locale.ROOT);
+    static final String ERROR_REASON = Reason.ERROR.name().toLowerCase(Locale.ROOT);
     static final String VERSION_METADATA_KEY = "version";
 
     private final DynatraceMetricsAggregator aggregator;
@@ -67,11 +69,12 @@ final class DynatraceMetricsHook implements Hook<Object> {
             aggregator.setVersion(version);
         }
 
+        String rawReason = details.getReason();
         String errorCode = normalizeErrorCode(details.getErrorCode());
         aggregator.record(
                 flagKey,
-                normalizeVariant(details.getVariant()),
-                normalizeReason(details.getReason(), errorCode),
+                normalizeVariant(details.getVariant(), rawReason, errorCode),
+                normalizeReason(rawReason, errorCode),
                 errorCode,
                 currentTimestampBucketSec());
 
@@ -90,15 +93,25 @@ final class DynatraceMetricsHook implements Hook<Object> {
         return ctx.getFlagKey();
     }
 
-    private String normalizeVariant(String variant) {
-        return variant == null || variant.isBlank() ? DEFAULT_VARIANT : variant;
+    private String normalizeVariant(String variant, String reason, String errorCode) {
+        if (errorCode != null || isDefaultReason(reason) || variant == null || variant.isBlank()) {
+            return DEFAULT_VARIANT;
+        }
+        return variant;
     }
 
     private String normalizeReason(String reason, String errorCode) {
+        if (errorCode != null) {
+            return ERROR_REASON;
+        }
         if (reason == null || reason.isBlank()) {
-            return errorCode == null ? UNKNOWN_REASON : ERROR_REASON;
+            return UNKNOWN_REASON;
         }
         return normalizeEnumName(reason);
+    }
+
+    private boolean isDefaultReason(String reason) {
+        return reason != null && DEFAULT_REASON.equals(normalizeEnumName(reason));
     }
 
     private String normalizeErrorCode(Enum<?> errorCode) {
