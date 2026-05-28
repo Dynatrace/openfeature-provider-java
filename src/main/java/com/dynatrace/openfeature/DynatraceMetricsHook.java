@@ -65,10 +65,6 @@ final class DynatraceMetricsHook implements Hook<Object> {
         }
 
         String version = readVersion(details);
-        if (version != null) {
-            aggregator.setVersion(version);
-        }
-
         String rawReason = details.getReason();
         String errorCode = normalizeErrorCode(details.getErrorCode());
         aggregator.record(
@@ -76,7 +72,8 @@ final class DynatraceMetricsHook implements Hook<Object> {
                 normalizeVariant(details.getVariant(), rawReason, errorCode),
                 normalizeReason(rawReason, errorCode),
                 errorCode,
-                currentTimestampBucketSec());
+                currentTimestampBucketSec(),
+                version);
 
         try {
             onRecord.run();
