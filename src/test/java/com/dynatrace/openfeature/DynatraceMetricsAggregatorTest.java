@@ -3,6 +3,9 @@ package com.dynatrace.openfeature;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -119,5 +122,49 @@ class DynatraceMetricsAggregatorTest {
         // Both dimensions must land in distinct inner-map slots — a string-concatenated key would
         // collide on the pipe character.
         assertEquals(2, aggregator.snapshot().get("flag").size());
+    }
+
+    @Test
+    void concurrentRecordAndDrainDoesNotLoseEvaluations() throws Exception {
+        DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        int workerCount = 4;
+        int recordsPerWorker = 1_000;
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(workerCount);
+        AtomicReference<Throwable> workerFailure = new AtomicReference<>();
+
+        for (int worker = 0; worker < workerCount; worker++) {
+            Thread thread = new Thread(() -> {
+                try {
+                    start.await();
+                    for (int i = 0; i < recordsPerWorker; i++) {
+                        aggregator.record("flag", "variant", "static", null, 1741780820);
+                    }
+                } catch (Throwable t) {
+                    workerFailure.compareAndSet(null, t);
+                } finally {
+                    done.countDown();
+                }
+            }, "metrics-aggregator-test-" + worker);
+            thread.start();
+        }
+
+        long drainedCount = 0;
+        start.countDown();
+        while (!done.await(1, TimeUnit.MILLISECONDS)) {
+            drainedCount += count(aggregator.drain());
+        }
+        drainedCount += count(aggregator.drain());
+
+        assertNull(workerFailure.get(), "worker thread failed");
+        assertEquals(workerCount * recordsPerWorker, drainedCount);
+        assertTrue(aggregator.snapshot().isEmpty());
+    }
+
+    private long count(DynatraceMetricsAggregator.DrainedBatch batch) {
+        return batch.getEvaluations().values().stream()
+                .flatMap(flagEvaluations -> flagEvaluations.values().stream())
+                .mapToLong(EvaluationMetricAggregate::getCount)
+                .sum();
     }
 }

@@ -16,14 +16,14 @@ import org.slf4j.LoggerFactory;
 final class DynatraceMetricsAggregator {
     private static final Logger log = LoggerFactory.getLogger(DynatraceMetricsAggregator.class);
 
-    static final int DEFAULT_HARD_CAP_SIZE = 10_000;
+    static final int DEFAULT_MAX_DISTINCT_FLAGS = 10_000;
 
     private Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> aggregateMetrics = new HashMap<>();
     private final int hardCapSize;
     private String version;
 
     DynatraceMetricsAggregator() {
-        this(DEFAULT_HARD_CAP_SIZE);
+        this(DEFAULT_MAX_DISTINCT_FLAGS);
     }
 
     DynatraceMetricsAggregator(int hardCapSize) {
