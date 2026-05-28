@@ -42,6 +42,7 @@ class EvaluationMetricsFlusherTest {
     @Test
     void evaluationMetricsFlusherBuildsDocumentedJsonPayload() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820L);
         aggregator.record("deleted-flag", "__default__", "error", "flag_not_found", 1741780820L);
 
@@ -130,13 +131,13 @@ class EvaluationMetricsFlusherTest {
     }
 
     @Test
-    void evaluationMetricsFlusherRequeuesBatchWhenNoVersionAvailable() throws Exception {
+    void evaluationMetricsAggregatorDropsRecordsWhenNoVersionAvailable() throws Exception {
         try (MockWebServer metricsServer = new MockWebServer()) {
             metricsServer.start();
 
             DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+            // no version set — record() must silently drop the evaluation
             aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820L);
-            // no version set on the aggregator — simulates pre-version-observation window
             EvaluationMetricsFlusher flusher = new EvaluationMetricsFlusher(
                     aggregator,
                     httpClient,
@@ -149,10 +150,9 @@ class EvaluationMetricsFlusherTest {
 
             flusher.shutdown();
 
-            // data must be requeued, no HTTP request should have been made
-            assertEquals(1L, aggregator.size(), "evaluations should be requeued when version is absent");
+            assertEquals(0L, aggregator.size(), "aggregator must be empty when no version is set");
             assertNull(metricsServer.takeRequest(200, TimeUnit.MILLISECONDS),
-                    "no HTTP request expected when version is absent");
+                    "no HTTP request expected when no evaluations were recorded");
         }
     }
 

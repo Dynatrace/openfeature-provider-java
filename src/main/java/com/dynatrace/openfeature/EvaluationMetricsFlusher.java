@@ -231,15 +231,7 @@ final class EvaluationMetricsFlusher {
             delivered = flushBatch(live);
         } finally {
             if (!delivered) {
-                if (live.getVersion() == null) {
-                    try {
-                        aggregator.mergeUnversioned(live);
-                    } catch (RuntimeException e) {
-                        log.warn("failed to requeue drained metrics batch: {}", e.toString());
-                    }
-                } else {
-                    sealedBatches.offerFirst(live);
-                }
+                sealedBatches.offerFirst(live);
             }
         }
     }
@@ -250,11 +242,6 @@ final class EvaluationMetricsFlusher {
      * requeue the batch for the next flush cycle.
      */
     private boolean flushBatch(DynatraceMetricsAggregator.DrainedBatch batch) {
-        if (batch.getVersion() == null) {
-            log.warn("skipping metrics flush: no config version available yet; requeueing {} flag(s)",
-                    batch.getEvaluations().size());
-            return false;
-        }
         String body = EvaluationMetricsPayload.build(
                 batch.getEvaluations(), batch.getVersion(), sdkVersion, providerName);
         try {
