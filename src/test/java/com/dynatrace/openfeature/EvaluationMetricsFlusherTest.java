@@ -277,6 +277,48 @@ class EvaluationMetricsFlusherTest {
     }
 
     @Test
+    void enqueueSealedBatchDropsBatchWhenQueueIsFull() throws Exception {
+        try (MockWebServer metricsServer = new MockWebServer()) {
+            metricsServer.start();
+            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES + 1; i++) {
+                metricsServer.enqueue(new MockResponse().setResponseCode(202));
+            }
+
+            DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+            EvaluationMetricsFlusher flusher = new EvaluationMetricsFlusher(
+                    aggregator,
+                    httpClient,
+                    TEST_KEY,
+                    metricsServer.url("/v1/metrics").toString(),
+                    Duration.ofMinutes(5),
+                    1_000,
+                    "1.2.3",
+                    "dynatrace");
+
+            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES + 1; i++) {
+                DynatraceMetricsAggregator batchAgg = new DynatraceMetricsAggregator();
+                String version = "174178080" + i;
+                batchAgg.setVersion(version);
+                batchAgg.record("flag-" + i, "on", "static", null, 1741780820L, version);
+                flusher.enqueueSealedBatch(batchAgg.drain());
+            }
+
+            flusher.shutdown();
+
+            assertEquals(EvaluationMetricsFlusher.MAX_SEALED_BATCHES,
+                    metricsServer.getRequestCount(),
+                    "only MAX_SEALED_BATCHES requests expected — the extra batch must be dropped");
+            // Drain the MAX_SEALED_BATCHES expected requests, then verify no further request arrives.
+            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES; i++) {
+                assertNotNull(metricsServer.takeRequest(5, TimeUnit.SECONDS),
+                        "expected request " + (i + 1) + " of " + EvaluationMetricsFlusher.MAX_SEALED_BATCHES);
+            }
+            assertNull(metricsServer.takeRequest(200, TimeUnit.MILLISECONDS),
+                    "no extra requests expected");
+        }
+    }
+
+    @Test
     void capacityFlushDoesNotImmediatelyRetryAfterFailure() throws Exception {
         try (MockWebServer metricsServer = new MockWebServer()) {
             metricsServer.start();

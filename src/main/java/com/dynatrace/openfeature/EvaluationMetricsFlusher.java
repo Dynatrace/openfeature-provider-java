@@ -49,6 +49,9 @@ final class EvaluationMetricsFlusher {
      */
     static final Duration FAILED_CAPACITY_RETRY_COOLDOWN = Duration.ofSeconds(30);
 
+    /** Maximum number of sealed batches held in the queue at any time. */
+    static final int MAX_SEALED_BATCHES = 10;
+
     private final DynatraceMetricsAggregator aggregator;
     private final HttpClient httpClient;
     private final URI metricsUri;
@@ -113,6 +116,11 @@ final class EvaluationMetricsFlusher {
      */
     void enqueueSealedBatch(DynatraceMetricsAggregator.DrainedBatch batch) {
         if (batch != null && !batch.isEmpty()) {
+            if (sealedBatches.size() >= MAX_SEALED_BATCHES) {
+                log.warn("sealed batch queue full ({} batches); dropping incoming batch for version {} to prevent unbounded growth",
+                        MAX_SEALED_BATCHES, batch.getVersion());
+                return;
+            }
             sealedBatches.offerLast(batch);
         }
     }
