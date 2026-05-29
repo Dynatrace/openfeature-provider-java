@@ -423,4 +423,10 @@ public final class DynatraceProvider extends EventProvider {
         return HttpClient.newBuilder()
                 .build();
     }
+
+    private static String resolveSdkVersion() {
+        Package pkg = DynatraceProvider.class.getPackage();
+        String version = pkg == null ? null : pkg.getImplementationVersion();
+        return version == null ? "unknown" : version;
+    }
 }

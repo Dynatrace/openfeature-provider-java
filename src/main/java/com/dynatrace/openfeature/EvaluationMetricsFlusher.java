@@ -1,5 +1,9 @@
 package com.dynatrace.openfeature;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -10,6 +14,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Deque;
+import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -284,6 +289,58 @@ final class EvaluationMetricsFlusher {
         }
         nextOutOfBandFlushAllowedNanos = System.nanoTime() + FAILED_CAPACITY_RETRY_COOLDOWN.toNanos();
         return false;
+    }
+
+    private static final class EvaluationMetricsPayload {
+
+        private static final String SDK_TYPE = "server";
+
+        // ObjectMapper is documented thread-safe once configured, so a single shared instance is fine.
+        private static final ObjectMapper MAPPER = new ObjectMapper();
+
+        private EvaluationMetricsPayload() {
+        }
+
+        static String build(
+                Map<String, ? extends Map<EvaluationMetricKey, EvaluationMetricAggregation>> snapshot,
+                String version,
+                String sdkVersion,
+                String providerName) {
+            ObjectNode root = MAPPER.createObjectNode();
+            root.put("version", version);
+            root.put("sdkType", SDK_TYPE);
+            root.put("sdkVersion", sdkVersion);
+            root.put("providerName", providerName);
+
+            ArrayNode evaluations = root.putArray("evaluations");
+            for (Map.Entry<String, ? extends Map<EvaluationMetricKey, EvaluationMetricAggregation>> outer
+                    : snapshot.entrySet()) {
+                String flagKey = outer.getKey();
+                Map<EvaluationMetricKey, EvaluationMetricAggregation> flagEvaluations = outer.getValue();
+                if (flagEvaluations == null) {
+                    continue;
+                }
+                for (EvaluationMetricAggregation aggregate : flagEvaluations.values()) {
+                    ObjectNode eval = evaluations.addObject();
+                    eval.put("flagKey", flagKey);
+                    eval.put("variant", aggregate.getVariant());
+                    eval.put("evaluationReason", aggregate.getReason());
+                    if (aggregate.getErrorCode() != null) {
+                        eval.put("errorCode", aggregate.getErrorCode());
+                    }
+                    eval.put("timestampSec", aggregate.getTimestampSec());
+                    eval.put("count", aggregate.getCount());
+                }
+            }
+
+            try {
+                return MAPPER.writeValueAsString(root);
+            } catch (JsonProcessingException e) {
+                // ObjectNode-tree serialization shouldn't throw in practice (no custom serializers,
+                // no I/O) but surface clearly if Jackson ever changes that.
+                throw new IllegalStateException("failed to serialize evaluation metrics payload", e);
+            }
+        }
     }
 
 }

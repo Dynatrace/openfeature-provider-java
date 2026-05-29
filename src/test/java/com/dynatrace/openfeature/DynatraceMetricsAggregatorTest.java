@@ -108,12 +108,12 @@ class DynatraceMetricsAggregatorTest {
         aggregator.record("flag-a", "v1", "static", null, 1741780820);
         DynatraceMetricsAggregator.DrainedBatch batch = aggregator.drain();
 
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> evaluations = batch.getEvaluations();
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> evaluations = batch.getEvaluations();
         assertThrows(UnsupportedOperationException.class, () -> evaluations.put("x", null));
         assertThrows(UnsupportedOperationException.class,
                 () -> evaluations.get("flag-a").put(
                         new EvaluationMetricKey("v2", "static", null, 1741780820),
-                        new EvaluationMetricAggregate(new EvaluationMetricKey("v2", "static", null, 1741780820))));
+                        new EvaluationMetricAggregation(new EvaluationMetricKey("v2", "static", null, 1741780820))));
     }
 
     @Test
@@ -169,7 +169,7 @@ class DynatraceMetricsAggregatorTest {
     private long count(DynatraceMetricsAggregator.DrainedBatch batch) {
         return batch.getEvaluations().values().stream()
                 .flatMap(flagEvaluations -> flagEvaluations.values().stream())
-                .mapToLong(EvaluationMetricAggregate::getCount)
+                .mapToLong(EvaluationMetricAggregation::getCount)
                 .sum();
     }
 }

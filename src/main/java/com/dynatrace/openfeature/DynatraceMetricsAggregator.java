@@ -18,7 +18,7 @@ final class DynatraceMetricsAggregator {
 
     static final int DEFAULT_MAX_DISTINCT_FLAGS = 10_000;
 
-    private Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> aggregateMetrics = new HashMap<>();
+    private Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> aggregateMetrics = new HashMap<>();
     private final int maxDistinctFlags;
     private String version;
 
@@ -43,8 +43,6 @@ final class DynatraceMetricsAggregator {
             return;
         }
         if (evaluationVersion != null && !version.equals(evaluationVersion)) {
-            log.warn("dropping evaluation for '{}': version mismatch (batch={}, eval={})",
-                    flagKey, version, evaluationVersion);
             return;
         }
         if (!aggregateMetrics.containsKey(flagKey) && aggregateMetrics.size() >= maxDistinctFlags) {
@@ -53,7 +51,7 @@ final class DynatraceMetricsAggregator {
         }
         EvaluationMetricKey key = new EvaluationMetricKey(variant, reason, errorCode, timestampSec);
         aggregateMetrics.computeIfAbsent(flagKey, ignored -> new HashMap<>())
-                .computeIfAbsent(key, EvaluationMetricAggregate::new)
+                .computeIfAbsent(key, EvaluationMetricAggregation::new)
                 .increment();
     }
 
@@ -79,17 +77,17 @@ final class DynatraceMetricsAggregator {
      * The drain is a copy of the live map to avoid aliasing issues.
      */
     synchronized DrainedBatch drain() {
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> previous = aggregateMetrics;
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> previous = aggregateMetrics;
         aggregateMetrics = new HashMap<>();
         String drainedVersion = version;
         return new DrainedBatch(previous, drainedVersion);
     }
 
     /** For testing only. Production flush path uses {@link #drain()}. */
-    synchronized Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> snapshot() {
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> copy =
+    synchronized Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> snapshot() {
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> copy =
                 sizedHashMap(aggregateMetrics.size());
-        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> outer : aggregateMetrics.entrySet()) {
+        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> outer : aggregateMetrics.entrySet()) {
             copy.put(outer.getKey(), Collections.unmodifiableMap(new HashMap<>(outer.getValue())));
         }
         return Collections.unmodifiableMap(copy);
@@ -107,10 +105,10 @@ final class DynatraceMetricsAggregator {
     }
 
     static final class DrainedBatch {
-        private final Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> evaluations;
+        private final Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> evaluations;
         private final String version;
 
-        private DrainedBatch(Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> evaluations,
+        private DrainedBatch(Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> evaluations,
                              String version) {
             this.evaluations = evaluations;
             this.version = version;
@@ -123,10 +121,10 @@ final class DynatraceMetricsAggregator {
         /**
          * Returns an unmodifiable view of the drained two-level evaluations map.
          */
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> getEvaluations() {
-            Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> wrapped =
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> getEvaluations() {
+            Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> wrapped =
                     sizedHashMap(evaluations.size());
-            for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> e : evaluations.entrySet()) {
+            for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> e : evaluations.entrySet()) {
                 wrapped.put(e.getKey(), Collections.unmodifiableMap(e.getValue()));
             }
             return Collections.unmodifiableMap(wrapped);

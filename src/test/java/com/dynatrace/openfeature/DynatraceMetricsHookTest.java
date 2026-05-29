@@ -46,7 +46,7 @@ class DynatraceMetricsHookTest {
         hook.finallyAfter(ctx, details, Collections.emptyMap());
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("header-redesign")
                 .get(new EvaluationMetricKey("control", "targeting_match", null, 1741780820));
         assertNotNull(aggregate);
@@ -72,7 +72,7 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("deleted-flag")
                 .get(new EvaluationMetricKey("__default__", "error", "flag_not_found", 1741780820));
         assertNotNull(aggregate);
@@ -99,7 +99,7 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("fallback-flag")
                 .get(new EvaluationMetricKey("__default__", "default", null, 1741780820));
         assertNotNull(aggregate);
@@ -124,7 +124,7 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("mismatched-type")
                 .get(new EvaluationMetricKey("__default__", "error", "type_mismatch", 1741780820));
         assertNotNull(aggregate);

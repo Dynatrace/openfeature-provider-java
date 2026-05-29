@@ -40,33 +40,47 @@ class EvaluationMetricsFlusherTest {
     }
 
     @Test
-    void evaluationMetricsFlusherBuildsDocumentedJsonPayload() {
-        DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
-        aggregator.setVersion("1741780800");
-        aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820L);
-        aggregator.record("deleted-flag", "__default__", "error", "flag_not_found", 1741780820L);
+    void evaluationMetricsFlusherBuildsDocumentedJsonPayload() throws Exception {
+        try (MockWebServer metricsServer = new MockWebServer()) {
+            metricsServer.start();
+            metricsServer.enqueue(new MockResponse().setResponseCode(202));
 
-        String body = EvaluationMetricsPayload.build(
-                aggregator.drain().getEvaluations(),
-                "1741780800",
-                "1.2.3",
-                "dynatrace");
+            DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+            aggregator.setVersion("1741780800");
+            aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820L);
+            aggregator.record("deleted-flag", "__default__", "error", "flag_not_found", 1741780820L);
+            EvaluationMetricsFlusher flusher = new EvaluationMetricsFlusher(
+                    aggregator,
+                    httpClient,
+                    TEST_KEY,
+                    metricsServer.url("/v1/metrics").toString(),
+                    Duration.ofMinutes(5),
+                    1_000,
+                    "1.2.3",
+                    "dynatrace");
 
-        assertTrue(body.startsWith("{") && body.endsWith("}"), "expected JSON object: " + body);
-        assertFalse(body.contains(",,"), "unexpected double comma in JSON: " + body);
-        assertTrue(body.contains("\"evaluations\":["), body);
-        assertTrue(body.contains("\"version\":\"1741780800\""), body);
-        assertTrue(body.contains("\"sdkType\":\"server\""), body);
-        assertTrue(body.contains("\"sdkVersion\":\"1.2.3\""), body);
-        assertTrue(body.contains("\"providerName\":\"dynatrace\""), body);
-        assertTrue(body.contains(
-                "\"flagKey\":\"header-redesign\",\"variant\":\"control\","
-                        + "\"evaluationReason\":\"targeting_match\","
-                        + "\"timestampSec\":1741780820,\"count\":1"), body);
-        assertTrue(body.contains(
-                "\"flagKey\":\"deleted-flag\",\"variant\":\"__default__\","
-                        + "\"evaluationReason\":\"error\",\"errorCode\":\"flag_not_found\","
-                        + "\"timestampSec\":1741780820,\"count\":1"), body);
+            flusher.shutdown();
+
+            RecordedRequest req = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(req, "expected HTTP POST during shutdown");
+            String body = req.getBody().readUtf8();
+
+            assertTrue(body.startsWith("{") && body.endsWith("}"), "expected JSON object: " + body);
+            assertFalse(body.contains(",,"), "unexpected double comma in JSON: " + body);
+            assertTrue(body.contains("\"evaluations\":["), body);
+            assertTrue(body.contains("\"version\":\"1741780800\""), body);
+            assertTrue(body.contains("\"sdkType\":\"server\""), body);
+            assertTrue(body.contains("\"sdkVersion\":\"1.2.3\""), body);
+            assertTrue(body.contains("\"providerName\":\"dynatrace\""), body);
+            assertTrue(body.contains(
+                    "\"flagKey\":\"header-redesign\",\"variant\":\"control\","
+                            + "\"evaluationReason\":\"targeting_match\","
+                            + "\"timestampSec\":1741780820,\"count\":1"), body);
+            assertTrue(body.contains(
+                    "\"flagKey\":\"deleted-flag\",\"variant\":\"__default__\","
+                            + "\"evaluationReason\":\"error\",\"errorCode\":\"flag_not_found\","
+                            + "\"timestampSec\":1741780820,\"count\":1"), body);
+        }
     }
 
     @Test
