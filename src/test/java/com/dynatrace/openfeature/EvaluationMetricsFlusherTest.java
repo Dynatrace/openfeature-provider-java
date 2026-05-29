@@ -262,6 +262,48 @@ class EvaluationMetricsFlusherTest {
     }
 
     @Test
+    void badRequestDropsBatchAndContinuesWithNextSealedBatch() throws Exception {
+        try (MockWebServer metricsServer = new MockWebServer()) {
+            metricsServer.start();
+            metricsServer.enqueue(new MockResponse().setResponseCode(400));
+            metricsServer.enqueue(new MockResponse().setResponseCode(202));
+
+            DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+            EvaluationMetricsFlusher flusher = new EvaluationMetricsFlusher(
+                    aggregator,
+                    httpClient,
+                    TEST_KEY,
+                    metricsServer.url("/v1/metrics").toString(),
+                    Duration.ofMinutes(5),
+                    1_000,
+                    "1.2.3",
+                    "dynatrace");
+
+            DynatraceMetricsAggregator first = new DynatraceMetricsAggregator();
+            first.setVersion("1741780800");
+            first.record("bad-payload-flag", "on", "static", null, 1741780820L, "1741780800");
+            flusher.enqueueSealedBatch(first.drain());
+
+            DynatraceMetricsAggregator second = new DynatraceMetricsAggregator();
+            second.setVersion("1741780900");
+            second.record("next-flag", "on", "static", null, 1741780910L, "1741780900");
+            flusher.enqueueSealedBatch(second.drain());
+
+            flusher.triggerFlush();
+
+            RecordedRequest badRequest = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(badRequest, "expected non-retryable batch attempt");
+            assertTrue(badRequest.getBody().readUtf8().contains("bad-payload-flag"));
+
+            RecordedRequest nextRequest = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(nextRequest, "expected flusher to continue after 400");
+            assertTrue(nextRequest.getBody().readUtf8().contains("next-flag"));
+
+            flusher.shutdown();
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked") // mocking HttpClient.send requires raw HttpResponse.BodyHandler
     void flushRequeuesBatchWhenHttpClientThrowsUncheckedException() throws Exception {
         // Simulates a misbehaving HttpClient that throws an unchecked exception not in the

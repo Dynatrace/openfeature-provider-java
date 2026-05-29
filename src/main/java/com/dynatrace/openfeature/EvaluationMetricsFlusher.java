@@ -278,6 +278,11 @@ final class EvaluationMetricsFlusher {
                 log.debug("evaluation metrics flush ok (status={}, payload bytes={})", status, body.length());
                 return true;
             }
+            if (status == 400) {
+                log.warn("evaluation metrics payload rejected with HTTP 400; dropping non-retryable batch (payload bytes={})",
+                        body.length());
+                return true;
+            }
             log.warn("evaluation metrics flush returned HTTP {}; payload bytes={}", status, body.length());
         } catch (IllegalArgumentException | IOException e) {
             log.warn("evaluation metrics flush HTTP error: {}", e.toString());
