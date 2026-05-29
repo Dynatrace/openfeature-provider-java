@@ -123,6 +123,18 @@
                     <argLine>-Dnet.bytebuddy.experimental=true</argLine>
                 </configuration>
             </plugin>
+            <!-- Adds Implementation-Version to the jar manifest for packaged deployments. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 

@@ -59,9 +59,6 @@ public final class DynatraceProvider extends EventProvider {
     static final Pattern KEY_PATTERN = Pattern.compile(
             "^(dt[0-9]{2})\\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$");
 
-    private static final String TEST_ONLY_SDK_KEY =
-            "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5";
-
     private static final Metadata METADATA = () -> PROVIDER_NAME;
 
     private final String cdnUrl;
@@ -107,15 +104,15 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     // for testing
-    DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
-        this(TEST_ONLY_SDK_KEY, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
+    DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
+        this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
                 validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
     }
 
     // for testing
-    DynatraceProvider(String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
+    DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
-        this(TEST_ONLY_SDK_KEY, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
+        this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
                 pollInterval, gracePeriod);
     }
 
@@ -427,6 +424,6 @@ public final class DynatraceProvider extends EventProvider {
     private static String resolveSdkVersion() {
         Package pkg = DynatraceProvider.class.getPackage();
         String version = pkg == null ? null : pkg.getImplementationVersion();
-        return version == null ? "unknown" : version;
+        return version != null && !version.isBlank() ? version : "0.0.0";
     }
 }

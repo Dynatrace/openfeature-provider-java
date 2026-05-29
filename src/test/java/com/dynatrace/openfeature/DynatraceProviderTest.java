@@ -72,7 +72,7 @@ class DynatraceProviderTest {
 
     private DynatraceProvider fastProvider(Duration gracePeriod) {
         CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
-        return new DynatraceProvider(mockCdnUrl(), new FlagdCore(), fetcher,
+        return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
                 Duration.ofMillis(50), gracePeriod);
     }
 
