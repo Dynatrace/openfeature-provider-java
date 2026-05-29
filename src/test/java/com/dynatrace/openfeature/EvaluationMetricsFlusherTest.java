@@ -280,6 +280,7 @@ class EvaluationMetricsFlusherTest {
     void enqueueSealedBatchDropsBatchWhenQueueIsFull() throws Exception {
         try (MockWebServer metricsServer = new MockWebServer()) {
             metricsServer.start();
+            // Enqueue enough 202s for MAX batches + 1 extra delivery after one slot frees up
             for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES + 1; i++) {
                 metricsServer.enqueue(new MockResponse().setResponseCode(202));
             }
@@ -295,26 +296,43 @@ class EvaluationMetricsFlusherTest {
                     "1.2.3",
                     "dynatrace");
 
-            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES + 1; i++) {
+            // Fill queue to MAX_SEALED_BATCHES
+            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES; i++) {
                 DynatraceMetricsAggregator batchAgg = new DynatraceMetricsAggregator();
-                String version = "174178080" + i;
+                String version = "1741780" + String.format("%03d", i);
                 batchAgg.setVersion(version);
                 batchAgg.record("flag-" + i, "on", "static", null, 1741780820L, version);
                 flusher.enqueueSealedBatch(batchAgg.drain());
             }
 
+            // One more — must be dropped (queue is full)
+            DynatraceMetricsAggregator extra = new DynatraceMetricsAggregator();
+            extra.setVersion("1741780999");
+            extra.record("flag-extra", "on", "static", null, 1741780820L, "1741780999");
+            flusher.enqueueSealedBatch(extra.drain());
+
+            // Flush MAX batches — this frees MAX slots
+            flusher.start();
+            flusher.triggerFlush();
+            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES; i++) {
+                assertNotNull(metricsServer.takeRequest(5, TimeUnit.SECONDS));
+            }
+
+            // Now a new batch must be accepted — one slot was freed
+            DynatraceMetricsAggregator afterFlush = new DynatraceMetricsAggregator();
+            afterFlush.setVersion("1741781000");
+            afterFlush.record("flag-new", "on", "static", null, 1741780820L, "1741781000");
+            flusher.enqueueSealedBatch(afterFlush.drain());
+
             flusher.shutdown();
 
-            assertEquals(EvaluationMetricsFlusher.MAX_SEALED_BATCHES,
-                    metricsServer.getRequestCount(),
-                    "only MAX_SEALED_BATCHES requests expected — the extra batch must be dropped");
-            // Drain the MAX_SEALED_BATCHES expected requests, then verify no further request arrives.
-            for (int i = 0; i < EvaluationMetricsFlusher.MAX_SEALED_BATCHES; i++) {
-                assertNotNull(metricsServer.takeRequest(5, TimeUnit.SECONDS),
-                        "expected request " + (i + 1) + " of " + EvaluationMetricsFlusher.MAX_SEALED_BATCHES);
-            }
-            assertNull(metricsServer.takeRequest(200, TimeUnit.MILLISECONDS),
-                    "no extra requests expected");
+            // The post-flush batch must have been delivered
+            RecordedRequest finalReq = metricsServer.takeRequest(5, TimeUnit.SECONDS);
+            assertNotNull(finalReq, "batch enqueued after slot freed must be delivered");
+            assertTrue(finalReq.getBody().readUtf8().contains("flag-new"));
+
+            // Nothing more
+            assertNull(metricsServer.takeRequest(200, TimeUnit.MILLISECONDS));
         }
     }
 

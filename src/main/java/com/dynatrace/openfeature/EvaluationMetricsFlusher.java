@@ -18,6 +18,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Scheduled flusher that drains the {@link DynatraceMetricsAggregator}, serializes the
@@ -64,6 +65,7 @@ final class EvaluationMetricsFlusher {
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final AtomicBoolean outOfBandFlushScheduled = new AtomicBoolean(false);
+    private final AtomicInteger sealedBatchCount = new AtomicInteger(0);
     private volatile long nextOutOfBandFlushAllowedNanos = 0L;
     private ScheduledFuture<?> scheduledTask;
 
@@ -116,7 +118,8 @@ final class EvaluationMetricsFlusher {
      */
     void enqueueSealedBatch(DynatraceMetricsAggregator.DrainedBatch batch) {
         if (batch != null && !batch.isEmpty()) {
-            if (sealedBatches.size() >= MAX_SEALED_BATCHES) {
+            if (sealedBatchCount.incrementAndGet() > MAX_SEALED_BATCHES) {
+                sealedBatchCount.decrementAndGet();
                 log.warn("sealed batch queue full ({} batches); dropping incoming batch for version {} to prevent unbounded growth",
                         MAX_SEALED_BATCHES, batch.getVersion());
                 return;
@@ -219,7 +222,9 @@ final class EvaluationMetricsFlusher {
             try {
                 delivered = flushBatch(sealed);
             } finally {
-                if (!delivered) {
+                if (delivered) {
+                    sealedBatchCount.decrementAndGet();
+                } else {
                     sealedBatches.offerFirst(sealed);
                 }
             }
@@ -239,6 +244,7 @@ final class EvaluationMetricsFlusher {
             delivered = flushBatch(live);
         } finally {
             if (!delivered) {
+                sealedBatchCount.incrementAndGet();
                 sealedBatches.offerFirst(live);
             }
         }
