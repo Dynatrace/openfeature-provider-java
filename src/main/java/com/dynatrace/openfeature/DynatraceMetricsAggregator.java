@@ -19,22 +19,22 @@ final class DynatraceMetricsAggregator {
     static final int DEFAULT_MAX_DISTINCT_FLAGS = 10_000;
 
     private Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> aggregateMetrics = new HashMap<>();
-    private final int hardCapSize;
+    private final int maxDistinctFlags;
     private String version;
 
     DynatraceMetricsAggregator() {
         this(DEFAULT_MAX_DISTINCT_FLAGS);
     }
 
-    DynatraceMetricsAggregator(int hardCapSize) {
-        if (hardCapSize <= 0) {
-            throw new IllegalArgumentException("hardCapSize must be positive");
+    DynatraceMetricsAggregator(int maxDistinctFlags) {
+        if (maxDistinctFlags <= 0) {
+            throw new IllegalArgumentException("maxDistinctFlags must be positive");
         }
-        this.hardCapSize = hardCapSize;
+        this.maxDistinctFlags = maxDistinctFlags;
     }
 
     synchronized void record(String flagKey, String variant, String reason, String errorCode, long timestampSec) {
-        if (!aggregateMetrics.containsKey(flagKey) && aggregateMetrics.size() >= hardCapSize) {
+        if (!aggregateMetrics.containsKey(flagKey) && aggregateMetrics.size() >= maxDistinctFlags) {
             log.debug("Dropping metrics due to max aggregator size");
             return;
         }
@@ -86,7 +86,7 @@ final class DynatraceMetricsAggregator {
      * and never call this method with it.
      *
      * <p>Incoming aggregates are copied — never aliased — so the live map cannot be mutated
-     * through any reference still held by the caller. Not bounded by {@code hardCapSize}:
+     * through any reference still held by the caller. Not bounded by {@code maxDistinctFlags}:
      * this path is restoring previously-accepted data and dropping it would lose committed
      * counts. The hard cap applies only to <em>new</em> dimensions arriving via {@link #record}.
      *

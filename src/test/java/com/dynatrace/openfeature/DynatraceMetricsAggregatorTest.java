@@ -43,22 +43,22 @@ class DynatraceMetricsAggregatorTest {
     }
 
     @Test
-    void metricsAggregatorDropsNewDimensionsBeyondHardCap() {
+    void metricsAggregatorDropsNewDimensionsBeyondMaxDistinctFlags() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator(2);
 
         aggregator.record("flag-a", "v1", "static", null, 1741780820);
         aggregator.record("flag-b", "v1", "static", null, 1741780820);
-        // hard cap reached — new dimensions are dropped
+        // max distinct flags reached — new dimensions are dropped
         aggregator.record("flag-c", "v1", "static", null, 1741780820);
         aggregator.record("flag-d", "v1", "static", null, 1741780820);
         // existing dimensions still accept count increments
         aggregator.record("flag-a", "v1", "static", null, 1741780820);
 
-        assertEquals(2L, aggregator.size(), "size must not exceed hard cap");
+        assertEquals(2L, aggregator.size(), "size must not exceed max distinct flags");
         DynatraceMetricsAggregator.DrainedBatch batch = aggregator.drain();
         assertEquals(2L,
                 batch.getEvaluations().get("flag-a").values().iterator().next().getCount(),
-                "existing dimension's count should keep accumulating after hard cap");
+                "existing dimension's count should keep accumulating after max distinct flags reached");
         assertNull(batch.getEvaluations().get("flag-c"), "dropped flag must not appear in batch");
     }
 
@@ -94,7 +94,7 @@ class DynatraceMetricsAggregatorTest {
     }
 
     @Test
-    void metricsAggregatorRejectsNonPositiveHardCap() {
+    void metricsAggregatorRejectsNonPositiveMaxDistinctFlags() {
         assertThrows(IllegalArgumentException.class, () -> new DynatraceMetricsAggregator(0));
         assertThrows(IllegalArgumentException.class, () -> new DynatraceMetricsAggregator(-1));
     }
