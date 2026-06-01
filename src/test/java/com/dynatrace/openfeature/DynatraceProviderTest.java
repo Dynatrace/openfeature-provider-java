@@ -587,6 +587,144 @@ class DynatraceProviderTest {
         assertDoesNotThrow(p::shutdown);
     }
 
+    // -- SSE behavior tests --
+
+    @Test
+    void extractSseUrl_returnsUrlForSseType() {
+        String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\",\"url\":\"https://realtime.ably.io/event-stream?key=abc&channels=xyz\",\"inactivityDelaySec\":120}]}";
+        assertEquals("https://realtime.ably.io/event-stream?key=abc&channels=xyz",
+                DynatraceProvider.extractSseUrl(config));
+    }
+
+    @Test
+    void extractSseUrl_returnsNullWhenNoEventStreams() {
+        assertEquals(null, DynatraceProvider.extractSseUrl("{\"flags\":{}}"));
+    }
+
+    @Test
+    void extractSseUrl_returnsNullWhenNoSseTypeEntry() {
+        String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"other\",\"url\":\"https://example.com\"}]}";
+        assertNull(DynatraceProvider.extractSseUrl(config));
+    }
+
+    @Test
+    void extractSseUrl_skipsNonSseEntriesAndFindsFirst() {
+        String config = "{\"flags\":{},\"eventStreams\":["
+                + "{\"type\":\"webhook\",\"url\":\"https://hook.example.com\"},"
+                + "{\"type\":\"sse\",\"url\":\"https://realtime.ably.io/sse\"}"
+                + "]}";
+        assertEquals("https://realtime.ably.io/sse", DynatraceProvider.extractSseUrl(config));
+    }
+
+    @Test
+    void extractSseUrl_returnsNullOnMalformedJson() {
+        assertNull(DynatraceProvider.extractSseUrl("not-json"));
+    }
+
+    @Test
+    void sseEnabledByDefault() {
+        DynatraceProviderOptions opts = DynatraceProviderOptions.builder().build();
+        assertTrue(opts.isSseEnabled());
+    }
+
+    @Test
+    void disableSseOptionWorks() {
+        DynatraceProviderOptions opts = DynatraceProviderOptions.builder()
+                .disableSse()
+                .build();
+        assertFalse(opts.isSseEnabled());
+    }
+
+    @Test
+    void pollFailureStaysReadyWhenSseConnected() throws Exception {
+        // init succeeds
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        // subsequent polls fail
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS * 5; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+
+        // simulate SSE connection — provider should stay READY despite poll failures
+        p.onSseConnected();
+
+        Thread.sleep(300); // allow polls to fire and fail
+
+        assertEquals(ProviderState.READY, p.getState());
+        p.shutdown();
+    }
+
+    @Test
+    void sseDisconnectTransitionsToStale() throws Exception {
+        // Use a very long poll interval so no poll fires during the assertion window.
+        // A 50ms poller could fire a 304 between onSseDisconnected() and assertEquals, recovering to READY.
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(30), Duration.ofSeconds(30));
+        p.initialize(new ImmutableContext());
+        p.onSseConnected();
+
+        assertEquals(ProviderState.READY, p.getState());
+
+        p.onSseDisconnected();
+        assertEquals(ProviderState.STALE, p.getState());
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseDisconnectDeduplicatesMultipleCalls() throws Exception {
+        // long poll interval: no background recovery can interfere with the assertion
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(30), Duration.ofSeconds(30));
+        p.initialize(new ImmutableContext());
+        p.onSseConnected();
+
+        // first disconnect → STALE
+        p.onSseDisconnected();
+        assertEquals(ProviderState.STALE, p.getState());
+
+        // second call should be a no-op (already disconnected, no duplicate STALE event or exception)
+        assertDoesNotThrow(p::onSseDisconnected);
+        assertEquals(ProviderState.STALE, p.getState());
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseReconnectAfterDisconnectRecoversThroughPoll() throws Exception {
+        // init succeeds
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        // polls fail while SSE is down
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+        // then a poll succeeds (after SSE reconnects and triggers re-fetch)
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+
+        p.onSseConnected();
+        p.onSseDisconnected();
+        assertEquals(ProviderState.STALE, p.getState());
+
+        // wait for recovery via polling
+        Thread.sleep(500);
+
+        assertEquals(ProviderState.READY, p.getState());
+        p.shutdown();
+    }
+
     @Test
     void evaluationBeforeInitializeReturnsFlagNotFound() {
         DynatraceProvider p = provider();
@@ -597,5 +735,157 @@ class DynatraceProviderTest {
         } finally {
             p.shutdown();
         }
+    }
+
+    // -- SSE message handling tests --
+
+    @Test
+    void sseMessageWithRefetchConfigTriggersImmediateRefetch() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG)
+                .addHeader("ETag", "\"v1\""));
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(60), Duration.ofSeconds(60));
+        p.initialize(new ImmutableContext());
+        server.takeRequest(); // initial fetch
+
+        p.onSseMessage(new SseMessage("refetchConfig", "\"abc123\"", 1771622898L));
+
+        okhttp3.mockwebserver.RecordedRequest triggered =
+                server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS);
+        assertNotNull(triggered, "expected a triggered re-fetch");
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseMessageWithUnknownTypeIsIgnored() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(60), Duration.ofSeconds(60));
+        p.initialize(new ImmutableContext());
+        server.takeRequest();
+
+        p.onSseMessage(new SseMessage("refetchEvaluation", "\"x\"", 1L));
+
+
+        okhttp3.mockwebserver.RecordedRequest extra =
+                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertNull(extra, "unknown SSE message types must not trigger a fetch");
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseMessageOutOfOrderIsDropped() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(60), Duration.ofSeconds(60));
+        p.initialize(new ImmutableContext());
+        server.takeRequest();
+
+        p.onSseMessage(new SseMessage("refetchConfig", "\"new\"", 200L));
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS));
+
+        // older lastModified — must be dropped
+        p.onSseMessage(new SseMessage("refetchConfig", "\"old\"", 100L));
+        okhttp3.mockwebserver.RecordedRequest extra =
+                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertNull(extra, "out-of-order SSE message must be dropped");
+
+        // duplicate lastModified — must also be dropped
+        p.onSseMessage(new SseMessage("refetchConfig", "\"dup\"", 200L));
+        okhttp3.mockwebserver.RecordedRequest extra2 =
+                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertNull(extra2, "duplicate SSE message must be dropped");
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseMessageNullLastModifiedAlwaysTriggersRefetch() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304));
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(60), Duration.ofSeconds(60));
+        p.initialize(new ImmutableContext());
+        server.takeRequest();
+
+        p.onSseMessage(new SseMessage("refetchConfig", null, 100L));
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "message with lastModified should trigger a fetch");
+
+        p.onSseMessage(new SseMessage("refetchConfig", null, null));
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "message with null lastModified must always trigger a fetch");
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseMessageFirstMessageWithLastModifiedSetsStoredValue() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304));
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(60), Duration.ofSeconds(60));
+        p.initialize(new ImmutableContext());
+        server.takeRequest();
+
+        p.onSseMessage(new SseMessage("refetchConfig", null, 500L));
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "first message should trigger a fetch and set stored lastModified to 500");
+
+        // same timestamp again — stored is now 500, incoming is 500 (equal) → drop
+        p.onSseMessage(new SseMessage("refetchConfig", null, 500L));
+        okhttp3.mockwebserver.RecordedRequest dropped =
+                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertNull(dropped, "message with same lastModified as stored must be dropped");
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseMessageParsing() {
+        SseMessage msg = SseMessage.parse(
+                "{\"type\":\"refetchConfig\",\"etag\":\"\\\"abc\\\"\",\"lastModified\":1771622898}");
+        assertNotNull(msg);
+        assertEquals("refetchConfig", msg.type);
+        assertEquals("\"abc\"", msg.etag);
+        assertEquals(1771622898L, msg.lastModified);
+    }
+
+    @Test
+    void sseMessageParsingTolerantToMissingOptionalFields() {
+        SseMessage msg = SseMessage.parse("{\"type\":\"refetchConfig\"}");
+        assertNotNull(msg);
+        assertEquals("refetchConfig", msg.type);
+        assertNull(msg.etag);
+        assertNull(msg.lastModified);
+    }
+
+    @Test
+    void sseMessageParsingRejectsUnparseableAndMissingType() {
+        assertNull(SseMessage.parse(null));
+        assertNull(SseMessage.parse(""));
+        assertNull(SseMessage.parse("not-json"));
+        assertNull(SseMessage.parse("{\"lastModified\":1}"));
     }
 }

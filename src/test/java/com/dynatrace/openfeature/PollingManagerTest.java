@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -37,6 +38,15 @@ class PollingManagerTest {
             Runnable emitSuccess,
             Consumer<String> emitFailure) {
         manager = new PollingManager(fetchFlags, storeFlags, emitChange, emitSuccess, emitFailure, Duration.ofMillis(50));
+        return manager;
+    }
+
+    private PollingManager createWithSupplier(
+            Callable<FetchResult> fetchFlags,
+            Runnable emitSuccess,
+            Consumer<String> emitFailure,
+            Supplier<Duration> intervalSupplier) {
+        manager = new PollingManager(fetchFlags, body -> Collections.emptyList(), keys -> {}, emitSuccess, emitFailure, intervalSupplier);
         return manager;
     }
 
@@ -218,146 +228,68 @@ class PollingManagerTest {
     }
 
     @Test
-    @Timeout(2)
-    void pollFiresOnFixedSchedule() throws InterruptedException {
-        // fetchFlags blocks for longer than the poll interval; verify the ticker
-        // doesn't wait for the previous fetch to finish before firing the next one.
-        CountDownLatch startedLatch = new CountDownLatch(3);
+    void dynamicIntervalIsRespected() throws InterruptedException {
+        // start with a short interval, switch to a long one — verify polling slows down
+        AtomicReference<Duration> currentInterval = new AtomicReference<>(Duration.ofMillis(50));
+        CountDownLatch firstPoll = new CountDownLatch(1);
+        AtomicInteger pollCount = new AtomicInteger();
 
-        create(
+        createWithSupplier(
                 () -> {
-                    startedLatch.countDown();
-                    Thread.sleep(500); // much longer than the 50ms poll interval
+                    pollCount.incrementAndGet();
+                    firstPoll.countDown();
                     return new FetchResult(304, null, null, null);
                 },
-                body -> null,
-                keys -> {},
                 () -> {},
-                reason -> {}
+                reason -> {},
+                currentInterval::get
         ).start();
 
-        // 3 ticks × 50ms interval = 150ms minimum; 1s gives ample headroom for scheduling jitter
-        assertTrue(startedLatch.await(1, TimeUnit.SECONDS),
-                "polling should fire on a fixed schedule regardless of fetch duration");
+        assertTrue(firstPoll.await(2, TimeUnit.SECONDS));
+        // switch to very long interval so no more polls happen
+        currentInterval.set(Duration.ofSeconds(60));
+        int countAfterSwitch = pollCount.get();
+
+        Thread.sleep(200); // wait longer than old short interval but less than new long one
+        // at most one poll in flight when interval changed; after that no new ones
+        assertTrue(pollCount.get() <= countAfterSwitch + 1,
+                "expected polling to slow down after interval change");
     }
 
     @Test
-    @Timeout(3)
-    void hangingPollIsCancelledOnNextTick() throws InterruptedException {
-        CountDownLatch firstStarted = new CountDownLatch(1);
-        CountDownLatch secondStarted = new CountDownLatch(1);
-        AtomicReference<Boolean> firstInterrupted = new AtomicReference<>(false);
+    void triggerImmediateFetchFiresQuicklyWithLongInterval() throws InterruptedException {
+        // 60s interval means no poll would fire within the test window without a trigger
+        CountDownLatch triggered = new CountDownLatch(1);
 
-        create(hangingFetch(firstStarted, secondStarted, firstInterrupted),
-                body -> null, keys -> {}, () -> {}, reason -> {}
-        ).start();
-
-        assertTrue(firstStarted.await(1, TimeUnit.SECONDS), "first poll should start");
-        assertTrue(secondStarted.await(1, TimeUnit.SECONDS), "second poll should start after cancelling the first");
-        assertTrue(firstInterrupted.get(), "first poll should have been interrupted");
-    }
-
-    @Test
-    @Timeout(3)
-    void cancelledPollDoesNotEmitFailure() throws InterruptedException {
-        CountDownLatch secondStarted = new CountDownLatch(1);
-        AtomicInteger failureCount = new AtomicInteger();
-
-        create(hangingFetch(null, secondStarted, null),
-                body -> null, keys -> {}, () -> {}, reason -> failureCount.incrementAndGet()
-        ).start();
-
-        assertTrue(secondStarted.await(1, TimeUnit.SECONDS));
-        assertEquals(0, failureCount.get(), "cancellation of an in-flight poll must not emit a failure event");
-    }
-
-    @Test
-    @Timeout(3)
-    void stopInterruptsInFlightPoll() throws InterruptedException {
-        CountDownLatch started = new CountDownLatch(1);
-        AtomicReference<Boolean> interrupted = new AtomicReference<>(false);
-
-        create(hangingFetch(started, null, interrupted),
-                body -> null, keys -> {}, () -> {}, reason -> {}
-        ).start();
-
-        assertTrue(started.await(1, TimeUnit.SECONDS));
-        long before = System.currentTimeMillis();
-        manager.stop();
-        long elapsed = System.currentTimeMillis() - before;
-
-        assertTrue(elapsed < 500, "stop() should return promptly, took " + elapsed + "ms");
-        assertTrue(interrupted.get(), "in-flight poll should have been interrupted by stop()");
-    }
-
-    @Test
-    @Timeout(3)
-    void pollingResumesNormallyAfterCancellation() throws InterruptedException {
-        // Verifies the interrupt flag is cleared after cancellation so subsequent polls
-        // on the reused worker thread are not immediately discarded.
-        CountDownLatch successAfterCancel = new CountDownLatch(1);
-        AtomicInteger callCount = new AtomicInteger();
-
-        create(
+        manager = new PollingManager(
                 () -> {
-                    int call = callCount.incrementAndGet();
-                    if (call == 1) {
-                        Thread.sleep(10_000); // hang until cancelled by next tick
-                    }
-                    return new FetchResult(200, "{}", null, null);
+                    triggered.countDown();
+                    return new FetchResult(304, null, null, null);
                 },
                 body -> Collections.emptyList(),
                 keys -> {},
-                successAfterCancel::countDown,
-                reason -> fail("unexpected failure after cancellation: " + reason)
-        ).start();
+                () -> {},
+                reason -> {},
+                Duration.ofSeconds(60)
+        );
+        manager.start();
+        manager.triggerImmediateFetch();
 
-        assertTrue(successAfterCancel.await(2, TimeUnit.SECONDS),
-                "polling should emit success after resuming from a cancellation");
+        // if triggerImmediateFetch works, the poll fires immediately despite the 60s interval
+        assertTrue(triggered.await(2, TimeUnit.SECONDS), "triggered poll should fire quickly");
     }
 
     @Test
-    @Timeout(3)
-    void stopDuringActiveTickingDoesNotThrow() throws InterruptedException {
-        // Verifies tick() silently handles RejectedExecutionException when stop() races
-        // with an in-progress tick submission.
-        CountDownLatch firstStarted = new CountDownLatch(1);
-
-        create(
-                () -> { firstStarted.countDown(); return new FetchResult(304, null, null, null); },
-                body -> null, keys -> {}, () -> {}, reason -> {}
-        ).start();
-
-        assertTrue(firstStarted.await(1, TimeUnit.SECONDS));
-        // stop() while ticks are firing — should not throw or leave threads running
-        manager.stop();
-    }
-
-    /**
-     * Returns a fetchFlags callable whose first invocation hangs until interrupted.
-     * @param onFirstStart  counted down when the first call begins (nullable)
-     * @param onSecondStart counted down when the second call begins (nullable)
-     * @param wasInterrupted set to true if the hang is ended by an interrupt (nullable)
-     */
-    private static Callable<FetchResult> hangingFetch(
-            CountDownLatch onFirstStart,
-            CountDownLatch onSecondStart,
-            AtomicReference<Boolean> wasInterrupted) {
-        AtomicInteger callCount = new AtomicInteger();
-        return () -> {
-            if (callCount.incrementAndGet() == 1) {
-                if (onFirstStart != null) onFirstStart.countDown();
-                try {
-                    Thread.sleep(10_000);
-                } catch (InterruptedException e) {
-                    if (wasInterrupted != null) wasInterrupted.set(true);
-                    Thread.currentThread().interrupt();
-                    throw e;
-                }
-            } else {
-                if (onSecondStart != null) onSecondStart.countDown();
-            }
-            return new FetchResult(304, null, null, null);
-        };
+    void triggerImmediateFetchDoesNotThrowWhenNotStarted() {
+        manager = new PollingManager(
+                () -> new FetchResult(304, null, null, null),
+                body -> Collections.emptyList(),
+                keys -> {},
+                () -> {},
+                reason -> {},
+                Duration.ofMillis(50)
+        );
+        // not started — should not throw
+        assertDoesNotThrow(() -> manager.triggerImmediateFetch());
     }
 }

@@ -33,8 +33,12 @@ import java.util.regex.Pattern;
  * Dynatrace OpenFeature provider for Java (server-side).
  *
  * <p>Wraps flagd-core for in-process evaluation and adds HTTP config fetching from the
- * Dynatrace CDN with ETag revalidation, polling, retry, and state management. Records
- * evaluation metrics in-process and periodically POSTs them to the Dynatrace metrics endpoint.
+ * Dynatrace CDN with ETag revalidation, SSE change notifications, polling, retry, and state
+ * management. Records evaluation metrics in-process and periodically POSTs them to the Dynatrace
+ * metrics endpoint.
+ *
+ * <p>When SSE is connected, polling acts as a 10-minute safety net. When SSE is
+ * disconnected or unavailable, polling runs every 10 seconds for faster recovery.
  *
  * <p>Usage:
  * <pre>{@code
@@ -52,7 +56,13 @@ public final class DynatraceProvider extends EventProvider {
     private static final Logger log = LoggerFactory.getLogger(DynatraceProvider.class);
 
     static final String PROVIDER_NAME = "dynatrace";
-    static final Duration POLL_INTERVAL = Duration.ofSeconds(10);
+
+    /** Poll interval when SSE is connected — SSE delivers notifications; polling is a safety net. */
+    static final Duration POLL_INTERVAL_SSE_CONNECTED = Duration.ofMinutes(10);
+
+    /** Poll interval when SSE is disconnected or disabled — aggressive to catch missed notifications. */
+    static final Duration POLL_INTERVAL_SSE_DISCONNECTED = Duration.ofSeconds(10);
+
     static final Duration GRACE_PERIOD = Duration.ofMinutes(1);
 
     /** SDK key format: {token}.server_{geo}_{publicRandom}.{secret}_{sha1} */
@@ -62,10 +72,12 @@ public final class DynatraceProvider extends EventProvider {
     private static final Metadata METADATA = () -> PROVIDER_NAME;
 
     private final String cdnUrl;
+    private final boolean sseEnabled;
     private final FlagdCore flagdCore;
     private final CdnFetcher fetcher;
-    private final Duration pollInterval;
     private final Duration gracePeriod;
+    /** non-null only in tests; overrides the SSE-aware dynamic interval with a fixed value */
+    private final Duration pollIntervalOverride;
     private final DynatraceMetricsAggregator metricsAggregator;
     private final EvaluationMetricsFlusher metricsFlusher;
 
@@ -76,9 +88,20 @@ public final class DynatraceProvider extends EventProvider {
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
     private final AtomicReference<ProviderState> state = new AtomicReference<>(ProviderState.NOT_READY);
+
+    /** True while the SSE connection is open and healthy. */
+    private final AtomicBoolean sseConnected = new AtomicBoolean(false);
+
+    /**
+     * Highest {@code lastModified} (epoch seconds) seen on an SSE {@code refetchConfig} message.
+     * Used to drop out-of-order or duplicate messages per the SSE message format spec.
+     */
+    private final AtomicReference<Long> lastSseLastModified = new AtomicReference<>(null);
+
+    private volatile SseManager sseManager;
     private volatile PollingManager pollingManager;
 
-    // grace timer; transitions STALE -> ERROR after grace period
+    // grace timer: transitions STALE -> ERROR after grace period
     private volatile ScheduledExecutorService graceScheduler;
     private volatile ScheduledFuture<?> graceTimer;
 
@@ -106,39 +129,40 @@ public final class DynatraceProvider extends EventProvider {
     // for testing
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+                null, GRACE_PERIOD);
     }
 
-    // for testing
+    // for testing — fixed poll interval regardless of SSE state
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
-                      Duration pollInterval, Duration gracePeriod) {
+                      Duration pollIntervalOverride, Duration gracePeriod) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                pollInterval, gracePeriod);
+                pollIntervalOverride, gracePeriod);
     }
 
     // tests only: lets tests inject every collaborator individually
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
         this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore,
                 new CdnFetcher(buildCdnUrl(sdkKey, options), httpClient), httpClient,
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+                null, GRACE_PERIOD);
     }
 
     // tests only: as above, plus a pre-built CdnFetcher and timing controls
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
-                      Duration pollInterval, Duration gracePeriod) {
+                      Duration pollIntervalOverride, Duration gracePeriod) {
         this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore, fetcher, buildDefaultHttpClient(),
-                pollInterval, gracePeriod);
+                pollIntervalOverride, gracePeriod);
     }
 
     private DynatraceProvider(String sdkKey, DynatraceProviderOptions options, String cdnUrl,
                               FlagdCore flagdCore, CdnFetcher fetcher, HttpClient metricsHttpClient,
-                              Duration pollInterval, Duration gracePeriod) {
+                              Duration pollIntervalOverride, Duration gracePeriod) {
         String trimmedSdkKey = validateSdkKey(sdkKey).group(0);
         DynatraceProviderOptions safeOptions = options == null ? DynatraceProviderOptions.builder().build() : options;
         this.cdnUrl = cdnUrl;
+        this.sseEnabled = safeOptions.isSseEnabled();
         this.flagdCore = flagdCore;
         this.fetcher = fetcher;
-        this.pollInterval = pollInterval;
+        this.pollIntervalOverride = pollIntervalOverride;
         this.gracePeriod = gracePeriod;
         this.metricsAggregator = new DynatraceMetricsAggregator(safeOptions.getMetricsHardCapDistinctFlags());
         this.metricsFlusher = new EvaluationMetricsFlusher(
@@ -152,17 +176,6 @@ public final class DynatraceProvider extends EventProvider {
                 PROVIDER_NAME);
         this.providerHooks = Collections.singletonList(
                 new DynatraceMetricsHook(metricsAggregator, Clock.systemUTC(), metricsFlusher::onRecord));
-    }
-
-    // poll interval must exceed the per-request timeout; otherwise the ticker cancels every
-    // poll before its first attempt can complete
-    private static Duration validatedPollInterval(Duration pollInterval) {
-        if (pollInterval.compareTo(CdnFetcher.REQUEST_TIMEOUT) <= 0) {
-            throw new IllegalArgumentException(
-                    "pollInterval (" + pollInterval.toMillis() + "ms) must be greater than the "
-                    + "request timeout (" + CdnFetcher.REQUEST_TIMEOUT.toMillis() + "ms)");
-        }
-        return pollInterval;
     }
 
     static String buildCdnUrl(String sdkKey, DynatraceProviderOptions options) {
@@ -214,11 +227,17 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     /**
-     * Fetches the initial configuration from the CDN, starts polling, and starts the
-     * evaluation-metrics flusher.
+     * Fetches the initial configuration from the CDN, opens the SSE connection, starts polling,
+     * and starts the evaluation-metrics flusher.
      *
-     * <p>The SDK calls this before making the provider available. It emits {@code PROVIDER_READY}
-     * on success or {@code PROVIDER_ERROR} if this method throws.
+     * <p>Initialization order (per spec §3.1):
+     * <ol>
+     *   <li>Fetch flagd config JSON from CDN</li>
+     *   <li>Load config into flagd-core</li>
+     *   <li>Open SSE connection (async; errors handled by callbacks)</li>
+     *   <li>Start polling timer</li>
+     *   <li>Emit {@code PROVIDER_READY} (via return)</li>
+     * </ol>
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
@@ -257,14 +276,36 @@ public final class DynatraceProvider extends EventProvider {
             return t;
         });
 
-        // start polling
+        // open SSE connection (spec §3.1 step 3)
+        if (sseEnabled) {
+            String sseUrl = extractSseUrl(body);
+            if (sseUrl != null) {
+                SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
+                try {
+                    sm.start();
+                    sseManager = sm;
+                } catch (Exception e) {
+                    log.warn("failed to start SSE connection; falling back to polling-only mode: {}", e.getMessage());
+                }
+            } else {
+                log.info("no SSE URL in CDN config; running in polling-only mode");
+            }
+        } else {
+            log.info("SSE disabled by configuration; running in polling-only mode");
+        }
+
+        // start polling with dynamic interval: 10m when SSE connected, 10s otherwise
+        // (pollIntervalOverride is set only in tests to use a fixed interval regardless of SSE state)
+        java.util.function.Supplier<Duration> intervalSupplier = pollIntervalOverride != null
+                ? () -> pollIntervalOverride
+                : () -> sseConnected.get() ? POLL_INTERVAL_SSE_CONNECTED : POLL_INTERVAL_SSE_DISCONNECTED;
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
                 this::onConfigurationChanged,
                 this::onFetchSuccess,
                 this::onFetchFailure,
-                pollInterval);
+                intervalSupplier);
         pollingManager.start();
 
         metricsFlusher.start();
@@ -272,8 +313,8 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     /**
-     * Performs a final metrics flush, stops polling, cancels in-flight requests, and cleans up.
-     * Idempotent.
+     * Closes SSE, stops polling, cancels in-flight requests, performs a final metrics flush, and
+     * cleans up. Idempotent.
      */
     @Override
     public void shutdown() {
@@ -281,6 +322,12 @@ public final class DynatraceProvider extends EventProvider {
             return;
         }
         log.info("shutting down Dynatrace provider");
+
+        // spec §6.1: close SSE first
+        SseManager sm = sseManager;
+        if (sm != null) {
+            sm.stop();
+        }
         PollingManager pm = pollingManager;
         if (pm != null) {
             pm.stop();
@@ -300,6 +347,75 @@ public final class DynatraceProvider extends EventProvider {
         log.info("Dynatrace provider shut down");
     }
 
+    // -- SSE callbacks (package-private for testing) --
+
+    void onSseConnected() {
+        sseConnected.set(true);
+        log.info("SSE connected; poll interval switched to {} minutes",
+                POLL_INTERVAL_SSE_CONNECTED.toMinutes());
+        // trigger an immediate re-fetch to catch changes during SSE connection establishment
+        PollingManager pm = pollingManager;
+        if (pm != null) {
+            pm.triggerImmediateFetch();
+        }
+    }
+
+    synchronized void onSseDisconnected() {
+        boolean wasConnected = sseConnected.getAndSet(false);
+        if (!wasConnected) {
+            // already in disconnected state; no duplicate transition needed
+            return;
+        }
+        log.warn("SSE disconnected; increasing poll frequency to {} seconds",
+                POLL_INTERVAL_SSE_DISCONNECTED.toSeconds());
+        // interval supplier picks up 10s on next poll reschedule automatically
+        if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
+            emitProviderStale(ProviderEventDetails.builder()
+                    .message("SSE disconnected")
+                    .build());
+            startGraceTimer();
+        }
+    }
+
+    /**
+     * Handles a parsed SSE message per the SSE message format spec:
+     * <ul>
+     *   <li>Ignores any type other than {@code refetchConfig} (this is a server-side provider).</li>
+     *   <li>Drops out-of-order / duplicate messages by comparing {@code lastModified} against the
+     *       highest value seen so far using a CAS loop to avoid TOCTOU races.</li>
+     *   <li>Triggers an immediate conditional GET against the CDN URL.</li>
+     * </ul>
+     */
+    void onSseMessage(SseMessage msg) {
+        if (msg == null) {
+            return;
+        }
+        if (!SseMessage.TYPE_REFETCH_CONFIG.equals(msg.type)) {
+            log.debug("ignoring SSE message of type '{}' (server provider only handles '{}')",
+                    msg.type, SseMessage.TYPE_REFETCH_CONFIG);
+            return;
+        }
+        if (msg.lastModified != null) {
+            long incoming = msg.lastModified;
+            Long previous;
+            do {
+                previous = lastSseLastModified.get();
+                if (previous != null && Long.compare(incoming, previous) <= 0) {
+                    log.debug("dropping out-of-order SSE message (lastModified={} <= seen={})",
+                            incoming, previous);
+                    return;
+                }
+            } while (!lastSseLastModified.compareAndSet(previous, incoming));
+        }
+        log.debug("SSE refetchConfig received; triggering immediate CDN re-fetch (lastModified={})",
+                msg.lastModified);
+        PollingManager pm = pollingManager;
+        if (pm != null) {
+            pm.triggerImmediateFetch();
+        }
+    }
+
+    // -- poll callbacks --
 
     // package-private to let tests drive a config switch without standing up a real PollingManager
     List<String> storeFlags(String json) {
@@ -339,9 +455,20 @@ public final class DynatraceProvider extends EventProvider {
         }
     }
 
+    /**
+     * Handles a poll failure.
+     *
+     * <p>Per spec §4.1: a poll failure stays {@code READY} when SSE is healthy —
+     * SSE continues to deliver notifications and the next poll will retry. Only
+     * when SSE is also down do we transition to {@code STALE}.
+     */
     private synchronized void onFetchFailure(String reason) {
+        if (sseConnected.get()) {
+            log.warn("poll failed (SSE healthy, staying READY): {}", reason);
+            return;
+        }
         if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
-            log.warn("poll failed, transitioning to STALE: {}", reason);
+            log.warn("poll failed and SSE disconnected, transitioning to STALE: {}", reason);
             emitProviderStale(ProviderEventDetails.builder()
                     .message(reason)
                     .build());
@@ -356,6 +483,8 @@ public final class DynatraceProvider extends EventProvider {
                 .flagsChanged(changedKeys)
                 .build());
     }
+
+    // -- grace timer --
 
     private synchronized void startGraceTimer() {
         cancelGraceTimer();
@@ -385,6 +514,8 @@ public final class DynatraceProvider extends EventProvider {
                     .build());
         }
     }
+
+    // -- flag evaluation (delegate to flagd-core) --
 
     @Override
     public ProviderEvaluation<Boolean> getBooleanEvaluation(String key, Boolean defaultValue, EvaluationContext ctx) {
@@ -416,9 +547,21 @@ public final class DynatraceProvider extends EventProvider {
         return state.get();
     }
 
+    // -- utilities --
+
+    /**
+     * Extracts the SSE URL from the CDN config JSON.
+     *
+     * <p>Looks for the first entry in {@code eventStreams} with {@code type == "sse"}.
+     * Returns null if the field is absent or no SSE entry is present.
+     */
+    static String extractSseUrl(String configJson) {
+        CdnConfig config = CdnConfig.parse(configJson);
+        return config != null ? config.sseUrl() : null;
+    }
+
     private static HttpClient buildDefaultHttpClient() {
-        return HttpClient.newBuilder()
-                .build();
+        return HttpClient.newBuilder().build();
     }
 
     private static String resolveSdkVersion() {
