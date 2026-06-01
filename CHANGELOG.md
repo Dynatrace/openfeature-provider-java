@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.0-alpha...v0.4.1-alpha) (2026-06-01)
+
+
+### ✨ New Features
+
+* metric aggregation primitives and hook (1/2) ref: ICP-5377 ([#14](https://github.com/Dynatrace/openfeature-provider-java/issues/14)) ([e8a2952](https://github.com/Dynatrace/openfeature-provider-java/commit/e8a2952bcc2083623d6404597db27347527907b0))
+* metric flusher and provider wiring (2/2) ref ICP-5378 ([#15](https://github.com/Dynatrace/openfeature-provider-java/issues/15)) ([3b4cde0](https://github.com/Dynatrace/openfeature-provider-java/commit/3b4cde031bbcf81a3dde7149f4132470bae6d038))
+
 ## [0.4.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.3.0-alpha...v0.4.0-alpha) (2026-05-26)
 
 
