@@ -1,5 +1,6 @@
 package com.dynatrace.openfeature;
 
+import dev.openfeature.sdk.ErrorCode;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.Hook;
 import dev.openfeature.sdk.HookContext;
@@ -9,7 +10,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
+import java.util.EnumMap;
 import java.util.Locale;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -38,6 +41,20 @@ final class DynatraceMetricsHook implements Hook<Object> {
     static final String ERROR_REASON = Reason.ERROR.name().toLowerCase(Locale.ROOT);
     static final String VERSION_METADATA_KEY = "version";
 
+    private static final Map<String, String> REASON_NAMES = new HashMap<>();
+    private static final Map<ErrorCode, String> ERROR_CODE_NAMES = new EnumMap<>(ErrorCode.class);
+
+    static {
+        for (Reason reason : Reason.values()) {
+            String normalized = reason.name().toLowerCase(Locale.ROOT);
+            REASON_NAMES.put(reason.name(), normalized);
+            REASON_NAMES.put(normalized, normalized);
+        }
+        for (ErrorCode errorCode : ErrorCode.values()) {
+            ERROR_CODE_NAMES.put(errorCode, errorCode.name().toLowerCase(Locale.ROOT));
+        }
+    }
+
     private final DynatraceMetricsAggregator aggregator;
     private final Clock clock;
     private final Runnable onRecord;
@@ -65,10 +82,6 @@ final class DynatraceMetricsHook implements Hook<Object> {
         }
 
         String version = readVersion(details);
-        if (version != null) {
-            aggregator.setVersion(version);
-        }
-
         String rawReason = details.getReason();
         String errorCode = normalizeErrorCode(details.getErrorCode());
         aggregator.record(
@@ -76,7 +89,8 @@ final class DynatraceMetricsHook implements Hook<Object> {
                 normalizeVariant(details.getVariant(), rawReason, errorCode),
                 normalizeReason(rawReason, errorCode),
                 errorCode,
-                currentTimestampBucketSec());
+                currentTimestampBucketSec(),
+                version);
 
         try {
             onRecord.run();
@@ -111,15 +125,22 @@ final class DynatraceMetricsHook implements Hook<Object> {
     }
 
     private boolean isDefaultReason(String reason) {
-        return reason != null && DEFAULT_REASON.equals(normalizeEnumName(reason));
+        return Reason.DEFAULT.name().equals(reason) || DEFAULT_REASON.equals(reason);
     }
 
     private String normalizeErrorCode(Enum<?> errorCode) {
-        return errorCode == null ? null : normalizeEnumName(errorCode.name());
+        if (errorCode == null) {
+            return null;
+        }
+        if (errorCode instanceof ErrorCode) {
+            return ERROR_CODE_NAMES.get(errorCode);
+        }
+        return normalizeEnumName(errorCode.name());
     }
 
     private String normalizeEnumName(String value) {
-        return value.toLowerCase(Locale.ROOT);
+        String normalizedReason = REASON_NAMES.get(value);
+        return normalizedReason != null ? normalizedReason : value.toLowerCase(Locale.ROOT);
     }
 
     private String readVersion(FlagEvaluationDetails<Object> details) {
@@ -135,7 +156,7 @@ final class DynatraceMetricsHook implements Hook<Object> {
     }
 
     private long currentTimestampBucketSec() {
-        long epochSec = clock.instant().getEpochSecond();
+        long epochSec = clock.millis() / 1_000L;
         return Math.floorDiv(epochSec, 10) * 10;
     }
 }

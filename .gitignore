@@ -14,3 +14,4 @@ target/
 # macOS
 .DS_Store
 .worktrees/
+.claude/settings.json

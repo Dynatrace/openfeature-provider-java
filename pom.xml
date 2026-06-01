@@ -41,6 +41,9 @@
 
         <openfeature-sdk.version>1.19.1</openfeature-sdk.version>
         <flagd-core.version>[1.0.0,2.0.0)</flagd-core.version>
+        <!-- Aligned with the version flagd-core already pulls in transitively; declared
+             explicitly so we don't silently break if flagd-core changes its Jackson dep. -->
+        <jackson.version>2.21.2</jackson.version>
         <junit.version>5.11.4</junit.version>
         <okhttp.version>4.12.0</okhttp.version><!-- test only; mockwebserver -->
         <mockito.version>5.15.2</mockito.version>
@@ -62,6 +65,11 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <version>${slf4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
         </dependency>
 
         <!-- test dependencies -->
@@ -108,6 +116,24 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <configuration>
+                    <!--
+                        Remove once mockito-core is bumped to a release that officially supports the project's target JDK.  
+                    -->
+                    <argLine>-Dnet.bytebuddy.experimental=true</argLine>
+                </configuration>
+            </plugin>
+            <!-- Adds Implementation-Version to the jar manifest for packaged deployments. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+                        </manifest>
+                    </archive>
+                </configuration>
             </plugin>
         </plugins>
     </build>

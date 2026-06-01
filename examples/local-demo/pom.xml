@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Local demo for the Dynatrace OpenFeature Java provider.
+
+  How to run:
+    1. Build and install the provider from the repo root:
+         mvn install -DskipTests
+    2. Run this demo:
+         cd examples/local-demo
+         mvn compile exec:java
+
+  The demo starts a local HTTP server, loads flag-config.json, registers the
+  provider against it, then prints evaluation results for both the targeted
+  and non-targeted context (mirroring the web provider's react-app example).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.dynatrace.openfeature</groupId>
+    <artifactId>dynatrace-openfeature-java-local-demo</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <maven.compiler.release>11</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <provider.version>0.4.0-alpha</provider.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dynatrace.openfeature</groupId>
+            <artifactId>dynatrace-openfeature-provider-java</artifactId>
+            <version>${provider.version}</version>
+        </dependency>
+        <!-- logging output during the demo -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <configuration>
+                    <mainClass>com.dynatrace.openfeature.demo.LocalDemo</mainClass>
+                    <workingDirectory>${project.basedir}</workingDirectory>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

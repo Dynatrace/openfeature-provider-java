@@ -45,6 +45,7 @@ class DynatraceMetricsAggregatorTest {
     @Test
     void metricsAggregatorDropsNewDimensionsBeyondMaxDistinctFlags() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator(2);
+        aggregator.setVersion("1741780800");
 
         aggregator.record("flag-a", "v1", "static", null, 1741780820);
         aggregator.record("flag-b", "v1", "static", null, 1741780820);
@@ -63,34 +64,35 @@ class DynatraceMetricsAggregatorTest {
     }
 
     @Test
-    void mergeUnversionedCopiesAggregatesSoCallerCannotMutateLiveMap() {
+    void metricsAggregatorDropsRecordsWhenNoVersionSet() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
-        aggregator.record("flag-a", "v1", "static", null, 1741780820);
-        DynatraceMetricsAggregator.DrainedBatch batch = aggregator.drain();
-        aggregator.mergeUnversioned(batch);
+        aggregator.record("header-redesign", "control", "targeting_match", null, 1741780820);
 
-        // Mutate the original aggregate the caller still holds — the live map must not see it.
-        EvaluationMetricAggregate original =
-                batch.getEvaluations().get("flag-a").values().iterator().next();
-        original.add(99);
-
-        EvaluationMetricAggregate live = aggregator.snapshot()
-                .get("flag-a")
-                .get(new EvaluationMetricKey("v1", "static", null, 1741780820));
-        assertEquals(1L, live.getCount(),
-                "live aggregate must not alias the caller-visible instance");
+        assertEquals(0L, aggregator.size(), "evaluations must be dropped when no version is set");
+        assertTrue(aggregator.drain().isEmpty());
     }
 
     @Test
-    void mergeUnversionedRejectsVersionedBatchToPreservePerVersionBoundary() {
-        // A versioned batch must stay as its own batch so its counts can never be mixed into
-        // whatever version the aggregator observes next.
+    void metricsAggregatorDropsRecordOnVersionMismatch() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
         aggregator.setVersion("v1");
-        aggregator.record("flag-a", "on", "static", null, 1741780820);
-        DynatraceMetricsAggregator.DrainedBatch versionedBatch = aggregator.drain();
+        aggregator.record("flag-a", "on", "static", null, 1741780820, "v1");
+        // attempt to record under a different version while map is non-empty
+        aggregator.record("flag-b", "on", "static", null, 1741780820, "v2");
+        assertEquals(1L, aggregator.size(), "record with mismatched version must be dropped");
+        assertEquals("v1", aggregator.getVersion());
+    }
 
-        assertThrows(IllegalStateException.class, () -> aggregator.mergeUnversioned(versionedBatch));
+    @Test
+    void metricsAggregatorDropsRecordOnVersionMismatchEvenWhenMapIsEmpty() {
+        DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("v1");
+        aggregator.drain();
+        // map is empty but version is still v1 — mismatch must still be rejected;
+        // version transitions are now the provider's responsibility via setVersion()
+        aggregator.record("flag-a", "on", "static", null, 1741780820, "v2");
+        assertEquals(0L, aggregator.size(), "version mismatch must be dropped even on empty map");
+        assertEquals("v1", aggregator.getVersion(), "version must not change via record()");
     }
 
     @Test
@@ -102,20 +104,22 @@ class DynatraceMetricsAggregatorTest {
     @Test
     void drainedBatchEvaluationsMapIsUnmodifiable() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         aggregator.record("flag-a", "v1", "static", null, 1741780820);
         DynatraceMetricsAggregator.DrainedBatch batch = aggregator.drain();
 
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> evaluations = batch.getEvaluations();
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> evaluations = batch.getEvaluations();
         assertThrows(UnsupportedOperationException.class, () -> evaluations.put("x", null));
         assertThrows(UnsupportedOperationException.class,
                 () -> evaluations.get("flag-a").put(
                         new EvaluationMetricKey("v2", "static", null, 1741780820),
-                        new EvaluationMetricAggregate(new EvaluationMetricKey("v2", "static", null, 1741780820))));
+                        new EvaluationMetricAggregation(new EvaluationMetricKey("v2", "static", null, 1741780820))));
     }
 
     @Test
     void metricsAggregatorUsesTypedDimensionKeyWithoutDelimiterCollisions() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         aggregator.record("flag", "a|b", "c", null, 1741780820);
         aggregator.record("flag", "a", "b|c", null, 1741780820);
 
@@ -127,6 +131,7 @@ class DynatraceMetricsAggregatorTest {
     @Test
     void concurrentRecordAndDrainDoesNotLoseEvaluations() throws Exception {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         int workerCount = 4;
         int recordsPerWorker = 1_000;
         CountDownLatch start = new CountDownLatch(1);
@@ -164,7 +169,7 @@ class DynatraceMetricsAggregatorTest {
     private long count(DynatraceMetricsAggregator.DrainedBatch batch) {
         return batch.getEvaluations().values().stream()
                 .flatMap(flagEvaluations -> flagEvaluations.values().stream())
-                .mapToLong(EvaluationMetricAggregate::getCount)
+                .mapToLong(EvaluationMetricAggregation::getCount)
                 .sum();
     }
 }

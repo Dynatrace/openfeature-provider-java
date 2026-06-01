@@ -32,6 +32,7 @@ class DynatraceMetricsHookTest {
     @Test
     void metricsHookAggregatesEvaluationsByDocumentedDimensionKey() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         DynatraceMetricsHook hook = new DynatraceMetricsHook(
                 aggregator,
                 Clock.fixed(Instant.ofEpochSecond(1741780823), ZoneOffset.UTC));
@@ -45,7 +46,7 @@ class DynatraceMetricsHookTest {
         hook.finallyAfter(ctx, details, Collections.emptyMap());
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("header-redesign")
                 .get(new EvaluationMetricKey("control", "targeting_match", null, 1741780820));
         assertNotNull(aggregate);
@@ -59,6 +60,7 @@ class DynatraceMetricsHookTest {
     @Test
     void metricsHookUsesDefaultSentinelAndLowercaseErrorCodeForErrors() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         DynatraceMetricsHook hook = new DynatraceMetricsHook(
                 aggregator,
                 Clock.fixed(Instant.ofEpochSecond(1741780829), ZoneOffset.UTC));
@@ -70,7 +72,7 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("deleted-flag")
                 .get(new EvaluationMetricKey("__default__", "error", "flag_not_found", 1741780820));
         assertNotNull(aggregate);
@@ -84,6 +86,7 @@ class DynatraceMetricsHookTest {
     @Test
     void metricsHookUsesDefaultSentinelForDefaultReason() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         DynatraceMetricsHook hook = new DynatraceMetricsHook(
                 aggregator,
                 Clock.fixed(Instant.ofEpochSecond(1741780829), ZoneOffset.UTC));
@@ -96,7 +99,7 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("fallback-flag")
                 .get(new EvaluationMetricKey("__default__", "default", null, 1741780820));
         assertNotNull(aggregate);
@@ -107,6 +110,7 @@ class DynatraceMetricsHookTest {
     @Test
     void metricsHookForcesErrorReasonAndDefaultSentinelForErrors() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        aggregator.setVersion("1741780800");
         DynatraceMetricsHook hook = new DynatraceMetricsHook(
                 aggregator,
                 Clock.fixed(Instant.ofEpochSecond(1741780829), ZoneOffset.UTC));
@@ -120,7 +124,7 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
-        EvaluationMetricAggregate aggregate = aggregator.snapshot()
+        EvaluationMetricAggregation aggregate = aggregator.snapshot()
                 .get("mismatched-type")
                 .get(new EvaluationMetricKey("__default__", "error", "type_mismatch", 1741780820));
         assertNotNull(aggregate);
@@ -130,8 +134,11 @@ class DynatraceMetricsHookTest {
     }
 
     @Test
-    void metricsHookCapturesConfigVersionFromFlagMetadata() {
+    void metricsHookPassesVersionFromFlagMetadataToAggregator() {
         DynatraceMetricsAggregator aggregator = new DynatraceMetricsAggregator();
+        // version is set eagerly by the provider before any evaluation arrives;
+        // the hook passes it through to record() so the aggregator can validate it
+        aggregator.setVersion("1741780800");
         DynatraceMetricsHook hook = new DynatraceMetricsHook(
                 aggregator,
                 Clock.fixed(Instant.ofEpochSecond(1741780823), ZoneOffset.UTC));
@@ -147,6 +154,8 @@ class DynatraceMetricsHookTest {
 
         hook.finallyAfter(ctx, details, Collections.emptyMap());
 
+        // record must have been stored — version from metadata matched the aggregator's version
+        assertEquals(1L, aggregator.size(), "evaluation must be recorded when version matches");
         assertEquals("1741780800", aggregator.getVersion());
     }
 }

@@ -7,12 +7,12 @@ package com.dynatrace.openfeature;
  * <p>Dimension fields are stored once in the {@link EvaluationMetricKey} that identifies this
  * bucket; this class holds only the mutable {@code count}.
  */
-final class EvaluationMetricAggregate {
+final class EvaluationMetricAggregation {
 
     private final EvaluationMetricKey key;
     private long count;
 
-    EvaluationMetricAggregate(EvaluationMetricKey key) {
+    EvaluationMetricAggregation(EvaluationMetricKey key) {
         this.key = key;
     }
 
@@ -46,6 +46,6 @@ final class EvaluationMetricAggregate {
 
     @Override
     public String toString() {
-        return "EvaluationMetricAggregate{key=" + key + ", count=" + count + '}';
+        return "EvaluationMetricAggregation{key=" + key + ", count=" + count + '}';
     }
 }

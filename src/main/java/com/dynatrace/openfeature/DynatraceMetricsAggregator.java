@@ -18,7 +18,7 @@ final class DynatraceMetricsAggregator {
 
     static final int DEFAULT_MAX_DISTINCT_FLAGS = 10_000;
 
-    private Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> aggregateMetrics = new HashMap<>();
+    private Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> aggregateMetrics = new HashMap<>();
     private final int maxDistinctFlags;
     private String version;
 
@@ -34,15 +34,24 @@ final class DynatraceMetricsAggregator {
     }
 
     synchronized void record(String flagKey, String variant, String reason, String errorCode, long timestampSec) {
+        record(flagKey, variant, reason, errorCode, timestampSec, null);
+    }
+
+    synchronized void record(String flagKey, String variant, String reason, String errorCode, long timestampSec, String evaluationVersion) {
+        if (version == null) {
+            log.debug("dropping evaluation for '{}': no config version observed yet", flagKey);
+            return;
+        }
+        if (evaluationVersion != null && !version.equals(evaluationVersion)) {
+            return;
+        }
         if (!aggregateMetrics.containsKey(flagKey) && aggregateMetrics.size() >= maxDistinctFlags) {
             log.debug("Dropping metrics due to max aggregator size");
             return;
         }
-        // Per-flag dimension cardinality is naturally bounded by (variant × reason × errorCode ×
-        // 10s-time-bucket) and the flush interval, so the inner map doesn't need a separate cap.
         EvaluationMetricKey key = new EvaluationMetricKey(variant, reason, errorCode, timestampSec);
         aggregateMetrics.computeIfAbsent(flagKey, ignored -> new HashMap<>())
-                .computeIfAbsent(key, EvaluationMetricAggregate::new)
+                .computeIfAbsent(key, EvaluationMetricAggregation::new)
                 .increment();
     }
 
@@ -68,63 +77,17 @@ final class DynatraceMetricsAggregator {
      * The drain is a copy of the live map to avoid aliasing issues.
      */
     synchronized DrainedBatch drain() {
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> previous = aggregateMetrics;
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> previous = aggregateMetrics;
         aggregateMetrics = new HashMap<>();
         String drainedVersion = version;
         return new DrainedBatch(previous, drainedVersion);
     }
 
-    /**
-     * Restores a previously drained <em>unversioned</em> batch back into the live map so a later
-     * drain can pick it up under the eventual version. Used by the flusher to recover from a
-     * failed POST during the pre-version-observation window.
-     *
-     * <p>Versioned batches must <strong>not</strong> be merged: doing so would mix their counts
-     * into whatever version the aggregator subsequently observes, breaking the per-version
-     * batch boundary. Callers that hold a versioned {@link DrainedBatch} after a failed delivery
-     * must keep it as a separate batch (e.g. requeue it in the flusher's sealed-batch queue)
-     * and never call this method with it.
-     *
-     * <p>Incoming aggregates are copied — never aliased — so the live map cannot be mutated
-     * through any reference still held by the caller. Not bounded by {@code maxDistinctFlags}:
-     * this path is restoring previously-accepted data and dropping it would lose committed
-     * counts. The hard cap applies only to <em>new</em> dimensions arriving via {@link #record}.
-     *
-     * @throws IllegalStateException if {@code batch.getVersion() != null}
-     */
-    synchronized void mergeUnversioned(DrainedBatch batch) {
-        if (batch.getVersion() != null) {
-            throw new IllegalStateException(
-                    "cannot merge a versioned batch back into the live aggregator: "
-                            + "doing so would mix version '" + batch.getVersion() + "' counts "
-                            + "into the next observed version. Keep the batch separate instead.");
-        }
-        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> outer
-                : batch.getEvaluations().entrySet()) {
-            // Pre-size the inner map so the incoming entries land without a rehash.
-            int incomingSize = outer.getValue().size();
-            Map<EvaluationMetricKey, EvaluationMetricAggregate> flagEvaluations =
-                    aggregateMetrics.computeIfAbsent(outer.getKey(),
-                            ignored -> sizedHashMap(incomingSize));
-            for (Map.Entry<EvaluationMetricKey, EvaluationMetricAggregate> inner : outer.getValue().entrySet()) {
-                EvaluationMetricAggregate incoming = inner.getValue();
-                EvaluationMetricAggregate aggregate = flagEvaluations.get(inner.getKey());
-                if (aggregate == null) {
-                    EvaluationMetricAggregate copy = new EvaluationMetricAggregate(inner.getKey());
-                    copy.add(incoming.getCount());
-                    flagEvaluations.put(inner.getKey(), copy);
-                } else {
-                    aggregate.add(incoming.getCount());
-                }
-            }
-        }
-    }
-
     /** For testing only. Production flush path uses {@link #drain()}. */
-    synchronized Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> snapshot() {
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> copy =
+    synchronized Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> snapshot() {
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> copy =
                 sizedHashMap(aggregateMetrics.size());
-        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> outer : aggregateMetrics.entrySet()) {
+        for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> outer : aggregateMetrics.entrySet()) {
             copy.put(outer.getKey(), Collections.unmodifiableMap(new HashMap<>(outer.getValue())));
         }
         return Collections.unmodifiableMap(copy);
@@ -142,10 +105,10 @@ final class DynatraceMetricsAggregator {
     }
 
     static final class DrainedBatch {
-        private final Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> evaluations;
+        private final Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> evaluations;
         private final String version;
 
-        private DrainedBatch(Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> evaluations,
+        private DrainedBatch(Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> evaluations,
                              String version) {
             this.evaluations = evaluations;
             this.version = version;
@@ -158,10 +121,10 @@ final class DynatraceMetricsAggregator {
         /**
          * Returns an unmodifiable view of the drained two-level evaluations map.
          */
-        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> getEvaluations() {
-            Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> wrapped =
+        Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> getEvaluations() {
+            Map<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> wrapped =
                     sizedHashMap(evaluations.size());
-            for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregate>> e : evaluations.entrySet()) {
+            for (Map.Entry<String, Map<EvaluationMetricKey, EvaluationMetricAggregation>> e : evaluations.entrySet()) {
                 wrapped.put(e.getKey(), Collections.unmodifiableMap(e.getValue()));
             }
             return Collections.unmodifiableMap(wrapped);
