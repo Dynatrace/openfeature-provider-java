@@ -620,7 +620,7 @@ public final class DynatraceProvider extends EventProvider {
      * Returns null if the field is absent or no SSE entry is present.
      */
     static String extractSseUrl(String configJson) {
-        CdnConfig config = CdnConfig.parse(configJson);
+        CdnConfigJSON config = CdnConfigJSON.parse(configJson);
         return config != null ? config.sseUrl() : null;
     }
 

@@ -19,7 +19,7 @@ import java.util.List;
  * new {@code eventStreams} entry attributes) without breaking older SDK versions.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-final class CdnConfig {
+final class CdnConfigJSON {
 
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
@@ -30,7 +30,7 @@ final class CdnConfig {
     final List<EventStream> eventStreams;
 
     @JsonCreator
-    CdnConfig(@JsonProperty("eventStreams") List<EventStream> eventStreams) {
+    CdnConfigJSON(@JsonProperty("eventStreams") List<EventStream> eventStreams) {
         this.eventStreams = eventStreams;
     }
 
@@ -54,12 +54,12 @@ final class CdnConfig {
      * Parses the CDN config body. Returns {@code null} if the payload is not valid JSON — callers
      * should treat null as "no usable config" (the same way {@link SseMessage#parse} behaves).
      */
-    static CdnConfig parse(String json) {
+    static CdnConfigJSON parse(String json) {
         if (json == null || json.isBlank()) {
             return null;
         }
         try {
-            return MAPPER.readValue(json, CdnConfig.class);
+            return MAPPER.readValue(json, CdnConfigJSON.class);
         } catch (Exception e) {
             return null;
         }
