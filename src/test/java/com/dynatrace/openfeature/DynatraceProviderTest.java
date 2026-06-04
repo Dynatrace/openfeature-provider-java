@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -801,6 +802,55 @@ class DynatraceProviderTest {
 
         assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
                 "SSE connect should trigger an immediate re-fetch to catch missed changes");
+        p.shutdown();
+    }
+
+    @Test
+    void pollCadenceSlowsWhenSseConnectedAndSpeedsUpOnDisconnect() throws Exception {
+        // Assert the consequence of the SSE transitions (not just the state change): the poll
+        // cadence is the slow safety-net interval while connected and the fast interval once
+        // disconnect escalates. We count fetches over equal windows in each mode.
+        AtomicInteger fetches = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            private boolean served;
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (!served) {
+                    served = true;
+                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                }
+                fetches.incrementAndGet();
+                return new MockResponse().setResponseCode(304);
+            }
+        });
+
+        Duration connected = Duration.ofSeconds(5);    // slow safety net
+        Duration disconnected = Duration.ofMillis(50);  // aggressive
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                connected, disconnected, Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
+        p.initialize(new ImmutableContext());
+
+        // connected → slow cadence: no periodic poll should fire in a 300ms window
+        p.onSseConnected();
+        Thread.sleep(100); // let the interval switch (and the connect-triggered fetch) settle
+        fetches.set(0);
+        Thread.sleep(300);
+        int whileConnected = fetches.get();
+
+        // disconnected → after debounce, fast cadence: many polls in the same window
+        p.onSseDisconnected();
+        Thread.sleep(TEST_SSE_DEBOUNCE.toMillis() + 100); // let escalation/interval switch settle
+        fetches.set(0);
+        Thread.sleep(300);
+        int whileDisconnected = fetches.get();
+
+        assertTrue(whileConnected <= 1,
+                "slow safety-net cadence should not poll repeatedly while connected, saw " + whileConnected);
+        assertTrue(whileDisconnected >= 3,
+                "fast cadence should poll repeatedly after disconnect, saw " + whileDisconnected);
+        assertTrue(whileDisconnected > whileConnected, "cadence should speed up after SSE disconnect");
         p.shutdown();
     }
 
