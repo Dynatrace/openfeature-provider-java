@@ -14,9 +14,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -38,15 +38,6 @@ class PollingManagerTest {
             Runnable emitSuccess,
             Consumer<String> emitFailure) {
         manager = new PollingManager(fetchFlags, storeFlags, emitChange, emitSuccess, emitFailure, Duration.ofMillis(50));
-        return manager;
-    }
-
-    private PollingManager createWithSupplier(
-            Callable<FetchResult> fetchFlags,
-            Runnable emitSuccess,
-            Consumer<String> emitFailure,
-            Supplier<Duration> intervalSupplier) {
-        manager = new PollingManager(fetchFlags, body -> Collections.emptyList(), keys -> {}, emitSuccess, emitFailure, intervalSupplier);
         return manager;
     }
 
@@ -228,32 +219,87 @@ class PollingManagerTest {
     }
 
     @Test
-    void dynamicIntervalIsRespected() throws InterruptedException {
-        // start with a short interval, switch to a long one — verify polling slows down
-        AtomicReference<Duration> currentInterval = new AtomicReference<>(Duration.ofMillis(50));
+    void setIntervalToLongerCadenceSlowsPolling() throws InterruptedException {
         CountDownLatch firstPoll = new CountDownLatch(1);
         AtomicInteger pollCount = new AtomicInteger();
 
-        createWithSupplier(
+        create(
                 () -> {
                     pollCount.incrementAndGet();
                     firstPoll.countDown();
                     return new FetchResult(304, null, null, null);
                 },
+                body -> Collections.emptyList(),
+                keys -> {},
                 () -> {},
-                reason -> {},
-                currentInterval::get
+                reason -> {}
         ).start();
 
         assertTrue(firstPoll.await(2, TimeUnit.SECONDS));
-        // switch to very long interval so no more polls happen
-        currentInterval.set(Duration.ofSeconds(60));
+        // switch to a very long interval so no more polls happen within the test window
+        manager.setInterval(Duration.ofSeconds(60));
         int countAfterSwitch = pollCount.get();
 
-        Thread.sleep(200); // wait longer than old short interval but less than new long one
-        // at most one poll in flight when interval changed; after that no new ones
+        Thread.sleep(200); // longer than the old 50ms cadence, shorter than the new one
+        // at most one poll may have been in flight when the interval changed; none after
         assertTrue(pollCount.get() <= countAfterSwitch + 1,
-                "expected polling to slow down after interval change");
+                "expected polling to slow down after setInterval");
+    }
+
+    @Test
+    void setIntervalToShorterCadenceReAnchorsImmediately() throws InterruptedException {
+        // start slow so no poll fires on its own, then switch to a fast cadence
+        CountDownLatch polled = new CountDownLatch(2);
+        manager = new PollingManager(
+                () -> { polled.countDown(); return new FetchResult(304, null, null, null); },
+                body -> Collections.emptyList(),
+                keys -> {},
+                () -> {},
+                reason -> {},
+                Duration.ofSeconds(60));
+        manager.start();
+        manager.setInterval(Duration.ofMillis(50));
+
+        assertTrue(polled.await(2, TimeUnit.SECONDS),
+                "switching to a short interval should re-anchor the cadence and poll promptly");
+    }
+
+    @Test
+    @Timeout(5)
+    void overrunningPollIsCancelledOnNextTick() throws InterruptedException {
+        // a poll that blocks past the cadence must be cancelled (interrupted) so the next tick runs
+        AtomicBoolean firstWasInterrupted = new AtomicBoolean(false);
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        AtomicInteger attempt = new AtomicInteger();
+
+        create(
+                () -> {
+                    int n = attempt.incrementAndGet();
+                    if (n == 1) {
+                        firstStarted.countDown();
+                        try {
+                            // block well past the 50ms cadence; expect to be interrupted
+                            Thread.sleep(5_000);
+                        } catch (InterruptedException e) {
+                            firstWasInterrupted.set(true);
+                            throw e;
+                        }
+                        return new FetchResult(304, null, null, null);
+                    }
+                    secondStarted.countDown();
+                    return new FetchResult(304, null, null, null);
+                },
+                body -> Collections.emptyList(),
+                keys -> {},
+                () -> {},
+                reason -> {}
+        ).start();
+
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS), "first poll should start");
+        assertTrue(secondStarted.await(2, TimeUnit.SECONDS),
+                "a later tick should start a fresh poll despite the first overrunning");
+        assertTrue(firstWasInterrupted.get(), "the overrunning poll should have been interrupted");
     }
 
     @Test

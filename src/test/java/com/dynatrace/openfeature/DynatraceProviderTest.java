@@ -11,6 +11,7 @@ import dev.openfeature.sdk.ImmutableMetadata;
 import dev.openfeature.sdk.OpenFeatureAPI;
 import dev.openfeature.sdk.ProviderEvaluation;
 import dev.openfeature.sdk.ProviderState;
+import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -25,6 +26,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -40,6 +42,9 @@ class DynatraceProviderTest {
     /** no-sleep retry strategy for fast tests */
     private static final RetryStrategy NO_DELAY_RETRY =
             new RetryStrategy(new Random(42), ms -> {});
+
+    /** short SSE-disconnect debounce so escalation is observable quickly in tests */
+    private static final Duration TEST_SSE_DEBOUNCE = Duration.ofMillis(100);
 
     @BeforeEach
     void setUp() throws IOException {
@@ -73,7 +78,20 @@ class DynatraceProviderTest {
     private DynatraceProvider fastProvider(Duration gracePeriod) {
         CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
         return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
-                Duration.ofMillis(50), gracePeriod);
+                Duration.ofMillis(50), gracePeriod, TEST_SSE_DEBOUNCE);
+    }
+
+    /** Polls {@code provider.getState()} until it equals {@code expected} or the timeout elapses. */
+    private static void awaitState(DynatraceProvider provider, ProviderState expected, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (provider.getState() == expected) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        assertEquals(expected, provider.getState(), "state did not reach " + expected + " within " + timeoutMs + "ms");
     }
 
     private HookContext<Object> booleanHookContext(String flagKey) {
@@ -658,21 +676,51 @@ class DynatraceProviderTest {
 
     @Test
     void sseDisconnectTransitionsToStale() throws Exception {
-        // Use a very long poll interval so no poll fires during the assertion window.
-        // A 50ms poller could fire a 304 between onSseDisconnected() and assertEquals, recovering to READY.
+        // Long poll interval so the only fetches are SSE-triggered, not the background poller.
+        // Disconnect is debounced, so STALE arrives shortly after the debounce window elapses.
         server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        // absorb the immediate fetch fired on connect and on disconnect escalation
+        server.enqueue(new MockResponse().setResponseCode(304));
+        server.enqueue(new MockResponse().setResponseCode(304));
 
         DynatraceProvider p = new DynatraceProvider(
                 TEST_KEY, mockCdnUrl(), new FlagdCore(),
                 new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(30), Duration.ofSeconds(30));
+                Duration.ofSeconds(30), Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
         p.initialize(new ImmutableContext());
         p.onSseConnected();
 
         assertEquals(ProviderState.READY, p.getState());
 
+        // a sustained disconnect (debounce elapses with no reconnect) escalates to STALE
         p.onSseDisconnected();
-        assertEquals(ProviderState.STALE, p.getState());
+        awaitState(p, ProviderState.STALE, 2_000);
+
+        p.shutdown();
+    }
+
+    @Test
+    void sseBlipReconnectDoesNotGoStale() throws Exception {
+        // A fault immediately followed by a reconnect (within the debounce window) is a blip:
+        // the provider must stay READY and never emit STALE.
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304)); // connect-triggered fetch
+        server.enqueue(new MockResponse().setResponseCode(304)); // reconnect-triggered fetch
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(30), Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
+        p.initialize(new ImmutableContext());
+        p.onSseConnected();
+
+        // fault then reconnect before the debounce fires
+        p.onSseDisconnected();
+        p.onSseConnected();
+
+        // wait past the debounce window; state must remain READY (no escalation happened)
+        Thread.sleep(TEST_SSE_DEBOUNCE.toMillis() + 200);
+        assertEquals(ProviderState.READY, p.getState());
 
         p.shutdown();
     }
@@ -681,47 +729,78 @@ class DynatraceProviderTest {
     void sseDisconnectDeduplicatesMultipleCalls() throws Exception {
         // long poll interval: no background recovery can interfere with the assertion
         server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304));
+        server.enqueue(new MockResponse().setResponseCode(304));
 
         DynatraceProvider p = new DynatraceProvider(
                 TEST_KEY, mockCdnUrl(), new FlagdCore(),
                 new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(30), Duration.ofSeconds(30));
+                Duration.ofSeconds(30), Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
         p.initialize(new ImmutableContext());
         p.onSseConnected();
 
-        // first disconnect → STALE
-        p.onSseDisconnected();
-        assertEquals(ProviderState.STALE, p.getState());
-
-        // second call should be a no-op (already disconnected, no duplicate STALE event or exception)
+        // repeated fault callbacks (the event source fires these on every blip) must not throw and
+        // must collapse to a single escalation
         assertDoesNotThrow(p::onSseDisconnected);
-        assertEquals(ProviderState.STALE, p.getState());
+        assertDoesNotThrow(p::onSseDisconnected);
+        assertDoesNotThrow(p::onSseDisconnected);
+        awaitState(p, ProviderState.STALE, 2_000);
 
         p.shutdown();
     }
 
     @Test
-    void sseReconnectAfterDisconnectRecoversThroughPoll() throws Exception {
-        // init succeeds
-        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
-        // polls fail while SSE is down
-        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
-            server.enqueue(new MockResponse().setResponseCode(503));
-        }
-        // then a poll succeeds (after SSE reconnects and triggers re-fetch)
-        server.enqueue(new MockResponse().setResponseCode(304));
+    void sseDisconnectGoesStaleThenRecoversThroughPoll() throws Exception {
+        // First request serves the config; afterwards the CDN's health is toggled by cdnFailing,
+        // so STALE persists while it fails and the fast poll cadence recovers once it is healthy.
+        AtomicBoolean cdnFailing = new AtomicBoolean(false);
+        server.setDispatcher(new Dispatcher() {
+            private boolean served;
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (!served) {
+                    served = true;
+                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                }
+                return cdnFailing.get()
+                        ? new MockResponse().setResponseCode(503)
+                        : new MockResponse().setResponseCode(304);
+            }
+        });
 
         DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
         p.initialize(new ImmutableContext());
+        p.onSseConnected();
+
+        // CDN starts failing, then SSE drops: the debounced disconnect escalates to STALE and the
+        // failing fast polls keep it there.
+        cdnFailing.set(true);
+        p.onSseDisconnected();
+        awaitState(p, ProviderState.STALE, 2_000);
+
+        // CDN healthy again: the fast poll cadence recovers to READY
+        cdnFailing.set(false);
+        awaitState(p, ProviderState.READY, 2_000);
+        p.shutdown();
+    }
+
+    @Test
+    void sseConnectTriggersImmediateFetch() throws Exception {
+        // long poll interval so the only fetch after init is the one triggered by connect
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(60), Duration.ofSeconds(60), TEST_SSE_DEBOUNCE);
+        p.initialize(new ImmutableContext());
+        server.takeRequest(); // initial fetch
 
         p.onSseConnected();
-        p.onSseDisconnected();
-        assertEquals(ProviderState.STALE, p.getState());
 
-        // wait for recovery via polling
-        Thread.sleep(500);
-
-        assertEquals(ProviderState.READY, p.getState());
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "SSE connect should trigger an immediate re-fetch to catch missed changes");
         p.shutdown();
     }
 
@@ -783,8 +862,13 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void sseMessageOutOfOrderIsDropped() throws Exception {
+    void sseMessageTriggersFetchRegardlessOfLastModifiedOrder() throws Exception {
+        // The provider no longer tracks/compares lastModified: every refetchConfig poke triggers a
+        // conditional GET. Ordering/dedup is delegated to CdnFetcher's Last-Modified guard, which
+        // collapses a redundant or out-of-order poke to a cheap 304.
         server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304));
+        server.enqueue(new MockResponse().setResponseCode(304));
         server.enqueue(new MockResponse().setResponseCode(304));
 
         DynatraceProvider p = new DynatraceProvider(
@@ -792,22 +876,21 @@ class DynatraceProviderTest {
                 new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
                 Duration.ofSeconds(60), Duration.ofSeconds(60));
         p.initialize(new ImmutableContext());
-        server.takeRequest();
+        server.takeRequest(); // initial fetch
 
         p.onSseMessage(new SseMessage("refetchConfig", "\"new\"", 200L));
-        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS));
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "a refetchConfig message should trigger a fetch");
 
-        // older lastModified — must be dropped
+        // an older lastModified still triggers a fetch (the fetch is what enforces ordering, not us)
         p.onSseMessage(new SseMessage("refetchConfig", "\"old\"", 100L));
-        okhttp3.mockwebserver.RecordedRequest extra =
-                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
-        assertNull(extra, "out-of-order SSE message must be dropped");
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "an out-of-order message should still trigger a (conditional) fetch");
 
-        // duplicate lastModified — must also be dropped
+        // a duplicate lastModified likewise triggers a fetch
         p.onSseMessage(new SseMessage("refetchConfig", "\"dup\"", 200L));
-        okhttp3.mockwebserver.RecordedRequest extra2 =
-                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
-        assertNull(extra2, "duplicate SSE message must be dropped");
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "a duplicate message should still trigger a (conditional) fetch");
 
         p.shutdown();
     }
@@ -832,32 +915,6 @@ class DynatraceProviderTest {
         p.onSseMessage(new SseMessage("refetchConfig", null, null));
         assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
                 "message with null lastModified must always trigger a fetch");
-
-        p.shutdown();
-    }
-
-    @Test
-    void sseMessageFirstMessageWithLastModifiedSetsStoredValue() throws Exception {
-        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
-        server.enqueue(new MockResponse().setResponseCode(304));
-        server.enqueue(new MockResponse().setResponseCode(304));
-
-        DynatraceProvider p = new DynatraceProvider(
-                TEST_KEY, mockCdnUrl(), new FlagdCore(),
-                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(60), Duration.ofSeconds(60));
-        p.initialize(new ImmutableContext());
-        server.takeRequest();
-
-        p.onSseMessage(new SseMessage("refetchConfig", null, 500L));
-        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
-                "first message should trigger a fetch and set stored lastModified to 500");
-
-        // same timestamp again — stored is now 500, incoming is 500 (equal) → drop
-        p.onSseMessage(new SseMessage("refetchConfig", null, 500L));
-        okhttp3.mockwebserver.RecordedRequest dropped =
-                server.takeRequest(200, java.util.concurrent.TimeUnit.MILLISECONDS);
-        assertNull(dropped, "message with same lastModified as stored must be dropped");
 
         p.shutdown();
     }
