@@ -33,8 +33,12 @@ import java.util.regex.Pattern;
  * Dynatrace OpenFeature provider for Java (server-side).
  *
  * <p>Wraps flagd-core for in-process evaluation and adds HTTP config fetching from the
- * Dynatrace CDN with ETag revalidation, polling, retry, and state management. Records
- * evaluation metrics in-process and periodically POSTs them to the Dynatrace metrics endpoint.
+ * Dynatrace CDN with ETag revalidation, SSE change notifications, polling, retry, and state
+ * management. Records evaluation metrics in-process and periodically POSTs them to the Dynatrace
+ * metrics endpoint.
+ *
+ * <p>When SSE is connected, polling acts as a 10-minute safety net. When SSE is
+ * disconnected or unavailable, polling runs every 10 seconds for faster recovery.
  *
  * <p>Usage:
  * <pre>{@code
@@ -52,8 +56,22 @@ public final class DynatraceProvider extends EventProvider {
     private static final Logger log = LoggerFactory.getLogger(DynatraceProvider.class);
 
     static final String PROVIDER_NAME = "dynatrace";
-    static final Duration POLL_INTERVAL = Duration.ofSeconds(10);
+
+    /** Poll interval when SSE is connected — SSE delivers notifications; polling is a safety net. */
+    static final Duration POLL_INTERVAL_SSE_CONNECTED = Duration.ofMinutes(10);
+
+    /** Poll interval when SSE is disconnected or disabled — aggressive to catch missed notifications. */
+    static final Duration POLL_INTERVAL_SSE_DISCONNECTED = Duration.ofSeconds(10);
+
     static final Duration GRACE_PERIOD = Duration.ofMinutes(1);
+
+    /**
+     * How long to wait after an SSE fault before treating it as a real disconnect. The underlying
+     * event source auto-reconnects and fires its error/closed callbacks on every transient blip,
+     * so escalating immediately would flap STALE/READY on routine reconnects. We debounce: if the
+     * stream reopens within this window it was a blip (no-op); otherwise we escalate.
+     */
+    static final Duration SSE_DISCONNECT_DEBOUNCE = Duration.ofSeconds(5);
 
     /** SDK key format: {token}.server_{geo}_{publicRandom}.{secret}_{sha1} */
     static final Pattern KEY_PATTERN = Pattern.compile(
@@ -62,10 +80,13 @@ public final class DynatraceProvider extends EventProvider {
     private static final Metadata METADATA = () -> PROVIDER_NAME;
 
     private final String cdnUrl;
+    private final boolean sseEnabled;
     private final FlagdCore flagdCore;
     private final CdnFetcher fetcher;
-    private final Duration pollInterval;
     private final Duration gracePeriod;
+    private final Duration pollIntervalConnected;
+    private final Duration pollIntervalDisconnected;
+    private final Duration sseDisconnectDebounce;
     private final DynatraceMetricsAggregator metricsAggregator;
     private final EvaluationMetricsFlusher metricsFlusher;
 
@@ -76,11 +97,19 @@ public final class DynatraceProvider extends EventProvider {
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
     private final AtomicReference<ProviderState> state = new AtomicReference<>(ProviderState.NOT_READY);
+
+    /** True while the SSE connection is considered healthy (stays true through brief blips). */
+    private final AtomicBoolean sseConnected = new AtomicBoolean(false);
+
+    private volatile SseManager sseManager;
     private volatile PollingManager pollingManager;
 
-    // grace timer; transitions STALE -> ERROR after grace period
+    // grace timer: transitions STALE -> ERROR after grace period
     private volatile ScheduledExecutorService graceScheduler;
     private volatile ScheduledFuture<?> graceTimer;
+
+    // debounce timer: escalates a sustained SSE fault to a real disconnect (see SSE_DISCONNECT_DEBOUNCE)
+    private volatile ScheduledFuture<?> sseDisconnectTimer;
 
     /**
      * Creates a provider from the SDK key. CDN URL is derived automatically from the key.
@@ -106,40 +135,58 @@ public final class DynatraceProvider extends EventProvider {
     // for testing
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+                POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD, SSE_DISCONNECT_DEBOUNCE);
     }
 
-    // for testing
+    // for testing — a single fixed poll interval for both SSE states (cadence independent of SSE)
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
+        this(sdkKey, cdnUrl, flagdCore, fetcher, pollInterval, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
+    }
+
+    // for testing — fixed poll interval plus an explicit SSE-disconnect debounce
+    DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
+                      Duration pollInterval, Duration gracePeriod, Duration sseDisconnectDebounce) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                pollInterval, gracePeriod);
+                pollInterval, pollInterval, gracePeriod, sseDisconnectDebounce);
     }
 
     // tests only: lets tests inject every collaborator individually
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
         this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore,
                 new CdnFetcher(buildCdnUrl(sdkKey, options), httpClient), httpClient,
-                validatedPollInterval(POLL_INTERVAL), GRACE_PERIOD);
+                POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD, SSE_DISCONNECT_DEBOUNCE);
     }
 
-    // tests only: as above, plus a pre-built CdnFetcher and timing controls
+    // tests only: as above, plus a pre-built CdnFetcher and timing controls (fixed cadence both states)
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
         this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore, fetcher, buildDefaultHttpClient(),
-                pollInterval, gracePeriod);
+                pollInterval, pollInterval, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
+    }
+
+    // for testing — distinct connected/disconnected cadences, to observe the SSE-transition consequence
+    DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
+                      Duration pollIntervalConnected, Duration pollIntervalDisconnected,
+                      Duration gracePeriod, Duration sseDisconnectDebounce) {
+        this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
+                pollIntervalConnected, pollIntervalDisconnected, gracePeriod, sseDisconnectDebounce);
     }
 
     private DynatraceProvider(String sdkKey, DynatraceProviderOptions options, String cdnUrl,
                               FlagdCore flagdCore, CdnFetcher fetcher, HttpClient metricsHttpClient,
-                              Duration pollInterval, Duration gracePeriod) {
+                              Duration pollIntervalConnected, Duration pollIntervalDisconnected,
+                              Duration gracePeriod, Duration sseDisconnectDebounce) {
         String trimmedSdkKey = validateSdkKey(sdkKey).group(0);
         DynatraceProviderOptions safeOptions = options == null ? DynatraceProviderOptions.builder().build() : options;
         this.cdnUrl = cdnUrl;
+        this.sseEnabled = safeOptions.isSseEnabled();
         this.flagdCore = flagdCore;
         this.fetcher = fetcher;
-        this.pollInterval = pollInterval;
+        this.pollIntervalConnected = pollIntervalConnected;
+        this.pollIntervalDisconnected = pollIntervalDisconnected;
         this.gracePeriod = gracePeriod;
+        this.sseDisconnectDebounce = sseDisconnectDebounce;
         this.metricsAggregator = new DynatraceMetricsAggregator(safeOptions.getMetricsHardCapDistinctFlags());
         this.metricsFlusher = new EvaluationMetricsFlusher(
                 metricsAggregator,
@@ -152,17 +199,6 @@ public final class DynatraceProvider extends EventProvider {
                 PROVIDER_NAME);
         this.providerHooks = Collections.singletonList(
                 new DynatraceMetricsHook(metricsAggregator, Clock.systemUTC(), metricsFlusher::onRecord));
-    }
-
-    // poll interval must exceed the per-request timeout; otherwise the ticker cancels every
-    // poll before its first attempt can complete
-    private static Duration validatedPollInterval(Duration pollInterval) {
-        if (pollInterval.compareTo(CdnFetcher.REQUEST_TIMEOUT) <= 0) {
-            throw new IllegalArgumentException(
-                    "pollInterval (" + pollInterval.toMillis() + "ms) must be greater than the "
-                    + "request timeout (" + CdnFetcher.REQUEST_TIMEOUT.toMillis() + "ms)");
-        }
-        return pollInterval;
     }
 
     static String buildCdnUrl(String sdkKey, DynatraceProviderOptions options) {
@@ -214,11 +250,17 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     /**
-     * Fetches the initial configuration from the CDN, starts polling, and starts the
-     * evaluation-metrics flusher.
+     * Fetches the initial configuration from the CDN, opens the SSE connection, starts polling,
+     * and starts the evaluation-metrics flusher.
      *
-     * <p>The SDK calls this before making the provider available. It emits {@code PROVIDER_READY}
-     * on success or {@code PROVIDER_ERROR} if this method throws.
+     * <p>Initialization order (per spec §3.1):
+     * <ol>
+     *   <li>Fetch flagd config JSON from CDN</li>
+     *   <li>Load config into flagd-core</li>
+     *   <li>Open SSE connection (async; errors handled by callbacks)</li>
+     *   <li>Start polling timer</li>
+     *   <li>Emit {@code PROVIDER_READY} (via return)</li>
+     * </ol>
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
@@ -257,23 +299,45 @@ public final class DynatraceProvider extends EventProvider {
             return t;
         });
 
-        // start polling
+        // open SSE connection (spec §3.1 step 3)
+        if (sseEnabled) {
+            String sseUrl = extractSseUrl(body);
+            if (sseUrl != null) {
+                SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
+                try {
+                    sm.start();
+                    sseManager = sm;
+                } catch (Exception e) {
+                    log.warn("failed to start SSE connection; falling back to polling-only mode: {}", e.getMessage());
+                }
+            } else {
+                log.info("no SSE URL in CDN config; running in polling-only mode");
+            }
+        } else {
+            log.info("SSE disabled by configuration; running in polling-only mode");
+        }
+
+        // Start polling at the disconnected cadence; SSE connect/disconnect adjust it via setInterval.
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
                 this::onConfigurationChanged,
                 this::onFetchSuccess,
                 this::onFetchFailure,
-                pollInterval);
+                pollIntervalDisconnected);
         pollingManager.start();
+        // If SSE connected during init (before the manager existed), adopt the connected cadence.
+        if (sseConnected.get()) {
+            pollingManager.setInterval(pollIntervalConnected);
+        }
 
         metricsFlusher.start();
         log.info("Dynatrace provider initialized successfully");
     }
 
     /**
-     * Performs a final metrics flush, stops polling, cancels in-flight requests, and cleans up.
-     * Idempotent.
+     * Closes SSE, stops polling, cancels in-flight requests, performs a final metrics flush, and
+     * cleans up. Idempotent.
      */
     @Override
     public void shutdown() {
@@ -281,11 +345,18 @@ public final class DynatraceProvider extends EventProvider {
             return;
         }
         log.info("shutting down Dynatrace provider");
+
+        // spec §6.1: close SSE first
+        SseManager sm = sseManager;
+        if (sm != null) {
+            sm.stop();
+        }
         PollingManager pm = pollingManager;
         if (pm != null) {
             pm.stop();
         }
         cancelGraceTimer();
+        cancelSseDisconnectTimer();
         ScheduledExecutorService gs = graceScheduler;
         if (gs != null) {
             gs.shutdown();
@@ -300,6 +371,115 @@ public final class DynatraceProvider extends EventProvider {
         log.info("Dynatrace provider shut down");
     }
 
+    // -- SSE callbacks (package-private for testing) --
+
+    synchronized void onSseConnected() {
+        // A (re)connect aborts any pending disconnect escalation. If one was pending, the stream
+        // just blipped — pull current config in case we missed a change while it was down.
+        boolean hadPendingDisconnect = cancelSseDisconnectTimer();
+        boolean wasConnected = sseConnected.getAndSet(true);
+        PollingManager pm = pollingManager;
+        if (pm != null) {
+            pm.setInterval(pollIntervalConnected);
+        }
+        if (!wasConnected) {
+            log.info("SSE connected; poll interval switched to {}", pollIntervalConnected);
+        }
+        if (pm != null && (!wasConnected || hadPendingDisconnect)) {
+            pm.triggerImmediateFetch();
+        }
+    }
+
+    /**
+     * SSE fault callback. The event source auto-reconnects and fires this on every transient blip,
+     * so we don't escalate immediately: we start a debounce timer (idempotent across repeat faults)
+     * and only treat it as a real disconnect if the stream hasn't reopened by the time it fires.
+     */
+    synchronized void onSseDisconnected() {
+        if (!sseConnected.get()) {
+            // already escalated to disconnected; nothing to do
+            return;
+        }
+        if (sseDisconnectTimer != null && !sseDisconnectTimer.isDone()) {
+            // debounce already running; this is a repeat fault callback
+            return;
+        }
+        log.debug("SSE fault; starting {}ms disconnect debounce", sseDisconnectDebounce.toMillis());
+        try {
+            sseDisconnectTimer = graceScheduler.schedule(
+                    this::escalateSseDisconnect,
+                    sseDisconnectDebounce.toMillis(),
+                    TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            // scheduler already shut down; ignore
+        }
+    }
+
+    /**
+     * Runs when an SSE fault has persisted past the debounce window: switch to the aggressive poll
+     * cadence and go STALE. Switching the interval re-anchors the ticker, so the first fast poll is
+     * one (now short) interval away rather than up to a full SSE-connected interval — that closes
+     * the cadence gap without an extra out-of-band fetch that would instantly flap STALE→READY.
+     */
+    private synchronized void escalateSseDisconnect() {
+        if (!sseConnected.getAndSet(false)) {
+            return; // a reconnect beat us to it
+        }
+        log.warn("SSE disconnected; increasing poll frequency to {}", pollIntervalDisconnected);
+        PollingManager pm = pollingManager;
+        if (pm != null) {
+            pm.setInterval(pollIntervalDisconnected);
+        }
+        if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
+            emitProviderStale(ProviderEventDetails.builder()
+                    .message("SSE disconnected")
+                    .build());
+            startGraceTimer();
+        }
+    }
+
+    private synchronized boolean cancelSseDisconnectTimer() {
+        ScheduledFuture<?> timer = sseDisconnectTimer;
+        if (timer == null) {
+            return false;
+        }
+        boolean wasPending = !timer.isDone();
+        timer.cancel(false);
+        sseDisconnectTimer = null;
+        return wasPending;
+    }
+
+    /**
+     * Handles a parsed SSE message per the SSE message format spec:
+     * <ul>
+     *   <li>Ignores any type other than {@code refetchConfig} (this is a server-side provider).</li>
+     *   <li>Otherwise triggers an immediate conditional GET against the CDN URL.</li>
+     * </ul>
+     *
+     * <p>The message is only a "something changed" signal — the fetch always pulls CDN-current
+     * config, and {@link CdnFetcher} rejects any response whose {@code Last-Modified} isn't newer
+     * than what we last applied (it returns 304). So there's no need to track or compare
+     * {@code lastModified} here: duplicate, stale, or out-of-order pokes simply collapse to a cheap
+     * conditional GET, and the {@code CdnFetcher} guard remains the single source of ordering truth.
+     */
+    void onSseMessage(SseMessage msg) {
+        if (msg == null) {
+            return;
+        }
+        if (!SseMessage.TYPE_REFETCH_CONFIG.equals(msg.type)) {
+            log.debug("ignoring SSE message of type '{}' (server provider only handles '{}')",
+                    msg.type, SseMessage.TYPE_REFETCH_CONFIG);
+            return;
+        }
+        log.debug("SSE refetchConfig received; triggering immediate CDN re-fetch (lastModified={})",
+                msg.lastModified);
+        PollingManager pm = pollingManager;
+        if (pm != null) {
+            pm.triggerImmediateFetch();
+        }
+    }
+
+    // -- poll callbacks --
 
     // package-private to let tests drive a config switch without standing up a real PollingManager
     List<String> storeFlags(String json) {
@@ -339,9 +519,20 @@ public final class DynatraceProvider extends EventProvider {
         }
     }
 
+    /**
+     * Handles a poll failure.
+     *
+     * <p>Per spec §4.1: a poll failure stays {@code READY} when SSE is healthy —
+     * SSE continues to deliver notifications and the next poll will retry. Only
+     * when SSE is also down do we transition to {@code STALE}.
+     */
     private synchronized void onFetchFailure(String reason) {
+        if (sseConnected.get()) {
+            log.warn("poll failed (SSE healthy, staying READY): {}", reason);
+            return;
+        }
         if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
-            log.warn("poll failed, transitioning to STALE: {}", reason);
+            log.warn("poll failed and SSE disconnected, transitioning to STALE: {}", reason);
             emitProviderStale(ProviderEventDetails.builder()
                     .message(reason)
                     .build());
@@ -356,6 +547,8 @@ public final class DynatraceProvider extends EventProvider {
                 .flagsChanged(changedKeys)
                 .build());
     }
+
+    // -- grace timer --
 
     private synchronized void startGraceTimer() {
         cancelGraceTimer();
@@ -385,6 +578,8 @@ public final class DynatraceProvider extends EventProvider {
                     .build());
         }
     }
+
+    // -- flag evaluation (delegate to flagd-core) --
 
     @Override
     public ProviderEvaluation<Boolean> getBooleanEvaluation(String key, Boolean defaultValue, EvaluationContext ctx) {
@@ -416,9 +611,21 @@ public final class DynatraceProvider extends EventProvider {
         return state.get();
     }
 
+    // -- utilities --
+
+    /**
+     * Extracts the SSE URL from the CDN config JSON.
+     *
+     * <p>Looks for the first entry in {@code eventStreams} with {@code type == "sse"}.
+     * Returns null if the field is absent or no SSE entry is present.
+     */
+    static String extractSseUrl(String configJson) {
+        CdnConfigJSON config = CdnConfigJSON.parse(configJson);
+        return config != null ? config.sseUrl() : null;
+    }
+
     private static HttpClient buildDefaultHttpClient() {
-        return HttpClient.newBuilder()
-                .build();
+        return HttpClient.newBuilder().build();
     }
 
     private static String resolveSdkVersion() {

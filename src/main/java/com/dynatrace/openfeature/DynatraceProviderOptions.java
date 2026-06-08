@@ -36,6 +36,7 @@ public final class DynatraceProviderOptions {
     private final Duration metricsFlushInterval;
     private final int metricsSoftCapDistinctFlags;
     private final int metricsHardCapDistinctFlags;
+    private final boolean sseEnabled;
 
     private DynatraceProviderOptions(Builder builder) {
         this.configOrigin = builder.configOrigin;
@@ -43,6 +44,7 @@ public final class DynatraceProviderOptions {
         this.metricsFlushInterval = builder.metricsFlushInterval;
         this.metricsSoftCapDistinctFlags = DEFAULT_METRICS_SOFT_CAP_DISTINCT_FLAGS;
         this.metricsHardCapDistinctFlags = DEFAULT_METRICS_HARD_CAP_DISTINCT_FLAGS;
+        this.sseEnabled = builder.sseEnabled;
     }
 
     URI getConfigOrigin() {
@@ -74,6 +76,10 @@ public final class DynatraceProviderOptions {
         return metricsHardCapDistinctFlags;
     }
 
+    public boolean isSseEnabled() {
+        return sseEnabled;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -83,6 +89,7 @@ public final class DynatraceProviderOptions {
         URI configOrigin = null;
         String metricsUrl = null;
         Duration metricsFlushInterval = DEFAULT_METRICS_FLUSH_INTERVAL;
+        boolean sseEnabled = true;
 
         /**
          * Override the config origin (scheme, host, and port — no path).
@@ -127,6 +134,12 @@ public final class DynatraceProviderOptions {
                 return this;
             }
             this.metricsFlushInterval = interval;
+            return this;
+        }
+
+        /** Disables SSE; provider will poll only. Polling interval stays 10s. */
+        public Builder disableSse() {
+            this.sseEnabled = false;
             return this;
         }
 

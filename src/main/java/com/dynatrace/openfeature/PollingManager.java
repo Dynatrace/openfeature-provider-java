@@ -9,23 +9,28 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
- * Manages periodic polling of flag configurations.
+ * Manages periodic polling of flag configurations at a fixed, start-anchored cadence.
  *
- * <p>Polling fires on a fixed schedule anchored to when each request is initiated, not when
- * the previous request completed. If a previous fetch is still in its retry/backoff cycle when
- * the next interval elapses, that fetch is cancelled and a fresh one begins.
+ * <p>A ticker fires every {@code interval} — anchored to start, not to how long a poll takes, so
+ * retry/backoff inside a poll never stretches the cadence — and hands the actual work to a single
+ * worker thread. The ticker never blocks: if a previous poll is still running when the next tick
+ * fires, that poll is cancelled and a fresh one started.
  *
- * <p>Two executors are used: a single-threaded ticker that fires every {@code pollInterval} ms,
- * and a single-threaded worker that runs the actual fetch+retry work. The ticker is never blocked
- * by slow fetches.
+ * <p>The interval is event-driven via {@link #setInterval(Duration)}: the provider switches between
+ * the SSE-connected safety-net cadence and the faster SSE-disconnected cadence on SSE
+ * connect/disconnect, rather than re-evaluating an interval every cycle.
+ *
+ * <p>Call {@link #triggerImmediateFetch()} to request an out-of-band poll (e.g. on an SSE
+ * notification, or right after an SSE disconnect) without disturbing the ticker cadence.
  */
 final class PollingManager {
 
@@ -36,19 +41,21 @@ final class PollingManager {
     private final Consumer<List<String>> emitChange;
     private final Runnable emitSuccess;
     private final Consumer<String> emitFailure;
-    private final Duration pollInterval;
+
+    private volatile Duration interval;
 
     private ScheduledExecutorService ticker;
     private ExecutorService worker;
-    private final AtomicReference<Future<?>> currentPoll = new AtomicReference<>();
+    private volatile ScheduledFuture<?> tickerFuture;
+    private volatile Future<?> pollInFlight;
 
     /**
-     * @param fetchFlags   called to fetch flag configuration JSON from the CDN
-     * @param storeFlags   called to store the fetched JSON into the flag engine; returns changed flag keys
-     * @param emitChange   called with the list of changed flag keys after a successful store
-     * @param emitSuccess  called after any successful poll (including 304 not-modified)
-     * @param emitFailure  called with a reason string when a poll fails
-     * @param pollInterval interval between poll initiations (measured from start-of-request, not end)
+     * @param fetchFlags      called to fetch flag configuration JSON from the CDN
+     * @param storeFlags      called to store the fetched JSON; returns changed flag keys
+     * @param emitChange      called with changed flag keys after a successful store
+     * @param emitSuccess     called after any successful poll (including 304 not-modified)
+     * @param emitFailure     called with a reason string when a poll fails
+     * @param initialInterval the starting poll cadence; change at runtime via {@link #setInterval}
      */
     PollingManager(
             Callable<FetchResult> fetchFlags,
@@ -56,54 +63,87 @@ final class PollingManager {
             Consumer<List<String>> emitChange,
             Runnable emitSuccess,
             Consumer<String> emitFailure,
-            Duration pollInterval) {
+            Duration initialInterval) {
         this.fetchFlags = fetchFlags;
         this.storeFlags = storeFlags;
         this.emitChange = emitChange;
         this.emitSuccess = emitSuccess;
         this.emitFailure = emitFailure;
-        this.pollInterval = pollInterval;
+        this.interval = initialInterval;
     }
 
     /**
-     * Starts polling. Must be called after initial fetch/store succeeds.
+     * Starts polling. Must be called after the initial fetch/store succeeds.
+     * The first poll fires one interval after start.
      */
-    void start() {
-        worker = Executors.newSingleThreadExecutor(daemonThread("dt-provider-poller"));
-        ticker = Executors.newSingleThreadScheduledExecutor(daemonThread("dt-provider-ticker"));
-        ticker.scheduleAtFixedRate(
-                this::tick,
-                pollInterval.toMillis(),
-                pollInterval.toMillis(),
-                TimeUnit.MILLISECONDS);
+    synchronized void start() {
+        ticker = Executors.newSingleThreadScheduledExecutor(namedDaemon("dt-provider-poll-ticker"));
+        worker = Executors.newSingleThreadExecutor(namedDaemon("dt-provider-poll-worker"));
+        scheduleTicker();
     }
 
     /**
-     * Stops polling and shuts down both executors. Interrupts any in-flight retry cycle.
+     * Changes the poll cadence and re-anchors the schedule to now. This is a rare, event-driven
+     * call (SSE connect/disconnect), so there is no per-cycle reschedule churn. No-op if unchanged.
      */
-    void stop() {
+    synchronized void setInterval(Duration newInterval) {
+        if (newInterval.equals(interval)) {
+            return;
+        }
+        interval = newInterval;
+        scheduleTicker();
+    }
+
+    /**
+     * Cancels any in-flight poll and runs one immediately on the worker. Safe to call from any
+     * thread; does not disturb the ticker cadence. The {@link CdnFetcher}'s {@code tryLock} drops
+     * overlapping fetches, so a redundant trigger costs at most one conditional GET.
+     */
+    void triggerImmediateFetch() {
+        runPoll();
+    }
+
+    /** Stops polling and shuts down the ticker and worker, interrupting any in-flight poll. */
+    synchronized void stop() {
         if (ticker != null) {
             ticker.shutdownNow();
-        }
-        Future<?> poll = currentPoll.getAndSet(null);
-        if (poll != null) {
-            poll.cancel(true);
         }
         if (worker != null) {
             worker.shutdownNow();
         }
     }
 
-    private void tick() {
-        Future<?> prev = currentPoll.getAndSet(null);
-        if (prev != null && !prev.isDone()) {
-            log.debug("cancelling in-flight poll; starting fresh");
-            prev.cancel(true);
+    private synchronized void scheduleTicker() {
+        if (ticker == null || ticker.isShutdown()) {
+            return;
+        }
+        ScheduledFuture<?> previous = tickerFuture;
+        if (previous != null) {
+            previous.cancel(false);
+        }
+        long periodMs = interval.toMillis();
+        // Fixed-rate: ticks are anchored to start and never drift with poll duration. The tick body
+        // only hands work to the worker, so the ticker thread itself never blocks.
+        tickerFuture = ticker.scheduleAtFixedRate(this::runPoll, periodMs, periodMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Submits a poll to the worker, cancelling any still-running poll first so a slow or hung poll
+     * (one that overran the cadence) is abandoned rather than allowed to delay the next tick.
+     */
+    private synchronized void runPoll() {
+        if (worker == null || worker.isShutdown()) {
+            return;
+        }
+        Future<?> previous = pollInFlight;
+        if (previous != null && !previous.isDone()) {
+            log.debug("previous poll still running; cancelling and starting fresh");
+            previous.cancel(true);
         }
         try {
-            currentPoll.set(worker.submit(this::poll));
-        } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // worker was shut down by stop(); tick is a no-op
+            pollInFlight = worker.submit(this::poll);
+        } catch (RejectedExecutionException e) {
+            // worker shut down between the guard and submit; ignore
         }
     }
 
@@ -125,7 +165,7 @@ final class PollingManager {
                 return;
             }
 
-            // 429: rate limited, but we're still serving cached values (KB 2.3)
+            // 429: rate limited; still serving cached values (spec §2.3)
             if (result.isRateLimited()) {
                 log.debug("rate limited; serving cached values");
                 return;
@@ -151,20 +191,12 @@ final class PollingManager {
             }
         } catch (Exception e) {
             if (isInterrupted(e)) {
-                log.debug("poll cancelled by next tick");
+                log.debug("poll cancelled");
                 return;
             }
             log.warn("poll failed", e);
             emitFailure.accept(e.getMessage());
         }
-    }
-
-    private static ThreadFactory daemonThread(String name) {
-        return r -> {
-            Thread t = new Thread(r, name);
-            t.setDaemon(true);
-            return t;
-        };
     }
 
     private static boolean isInterrupted(Exception e) {
@@ -180,5 +212,13 @@ final class PollingManager {
             cause = cause.getCause();
         }
         return false;
+    }
+
+    private static ThreadFactory namedDaemon(String name) {
+        return r -> {
+            Thread t = new Thread(r, name);
+            t.setDaemon(true);
+            return t;
+        };
     }
 }
