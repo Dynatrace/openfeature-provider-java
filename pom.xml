@@ -43,7 +43,7 @@
         <flagd-core.version>[1.0.0,2.0.0)</flagd-core.version>
         <!-- Aligned with the version flagd-core already pulls in transitively; declared
              explicitly so we don't silently break if flagd-core changes its Jackson dep. -->
-        <jackson.version>2.21.2</jackson.version>
+        <jackson.version>2.22.0</jackson.version>
         <junit.version>5.11.4</junit.version>
         <okhttp.version>4.12.0</okhttp.version><!-- test only; mockwebserver -->
         <mockito.version>5.15.2</mockito.version>
