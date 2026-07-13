@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.2-alpha...v0.4.3-alpha) (2026-07-13)
+
+
+### ✨ New Features
+
+* ICP-4502: Implement the remaining spec for SSE host parsing. ([#21](https://github.com/Dynatrace/openfeature-provider-java/issues/21)) ([9ed09a3](https://github.com/Dynatrace/openfeature-provider-java/commit/9ed09a3687a233660454133e6a6dd2a82e6719a4))
+
 ## [0.4.2-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.1-alpha...v0.4.2-alpha) (2026-07-13)
 
 
