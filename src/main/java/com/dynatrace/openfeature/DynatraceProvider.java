@@ -627,7 +627,7 @@ public final class DynatraceProvider extends EventProvider {
         return config != null ? config.sseUrl(fallbackOrigin) : null;
     }
 
-    /** Overload for callers that only have the raw URL approach (no structured endpoint). */
+    /** Backward-compatible overload; structured endpoint without explicit origin returns null. */
     static String extractSseUrl(String configJson) {
         return extractSseUrl(configJson, null);
     }
