@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Duration;
@@ -206,7 +207,7 @@ public final class DynatraceProvider extends EventProvider {
         String trimmed = m.group(0);
         String type = m.group(2);
         String geo = m.group(3);
-        java.net.URI override = options != null ? options.getConfigOrigin() : null;
+        URI override = options != null ? options.getConfigOrigin() : null;
         String base = override != null
                 ? override.getScheme() + "://" + override.getAuthority() + "/" + type + "/"
                 : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
@@ -264,7 +265,7 @@ public final class DynatraceProvider extends EventProvider {
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
-        String host = java.net.URI.create(cdnUrl).getHost();
+        String host = URI.create(cdnUrl).getHost();
         log.info("initializing Dynatrace feature flag provider (host={})", host);
 
         FetchResult result;
@@ -301,7 +302,9 @@ public final class DynatraceProvider extends EventProvider {
 
         // open SSE connection (spec §3.1 step 3)
         if (sseEnabled) {
-            String sseUrl = extractSseUrl(body);
+            URI cdnUri = URI.create(cdnUrl);
+            String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
+            String sseUrl = extractSseUrl(body, cdnOrigin);
             if (sseUrl != null) {
                 SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
                 try {
@@ -614,14 +617,20 @@ public final class DynatraceProvider extends EventProvider {
     // -- utilities --
 
     /**
-     * Extracts the SSE URL from the CDN config JSON.
+     * Extracts the SSE URL from the CDN config JSON, using {@code fallbackOrigin} as the base
+     * URL origin when the stream entry uses a structured {@code endpoint} with no explicit origin.
      *
      * <p>Looks for the first entry in {@code eventStreams} with {@code type == "sse"}.
      * Returns null if the field is absent or no SSE entry is present.
      */
-    static String extractSseUrl(String configJson) {
+    static String extractSseUrl(String configJson, String fallbackOrigin) {
         CdnConfigJSON config = CdnConfigJSON.parse(configJson);
-        return config != null ? config.sseUrl() : null;
+        return config != null ? config.sseUrl(fallbackOrigin) : null;
+    }
+
+    /** Backward-compatible overload; structured endpoint without explicit origin returns null. */
+    static String extractSseUrl(String configJson) {
+        return extractSseUrl(configJson, null);
     }
 
     private static HttpClient buildDefaultHttpClient() {
