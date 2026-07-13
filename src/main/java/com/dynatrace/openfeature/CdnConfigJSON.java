@@ -36,7 +36,7 @@ final class CdnConfigJSON {
 
     /**
      * Structured endpoint alternative to the flat {@code url} field.
-     * Per ADR-0008: {@code origin} defaults to the provider's configured base URL if absent.
+     * {@code origin} defaults to the provider's configured base URL if absent.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     static final class Endpoint {
