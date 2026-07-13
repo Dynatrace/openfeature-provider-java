@@ -641,6 +641,38 @@ class DynatraceProviderTest {
     }
 
     @Test
+    void extractSseUrl_endpointWithExplicitOrigin() {
+        String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\",\"endpoint\":"
+                + "{\"origin\":\"https://sse.example.com\",\"requestUri\":\"/stream?ch=abc\"}}]}";
+        assertEquals("https://sse.example.com/stream?ch=abc",
+                DynatraceProvider.extractSseUrl(config, "https://cdn.ignored.com"));
+    }
+
+    @Test
+    void extractSseUrl_endpointWithoutOriginUsesFallback() {
+        String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\",\"endpoint\":"
+                + "{\"requestUri\":\"/stream?ch=abc\"}}]}";
+        assertEquals("https://cdn.fallback.com/stream?ch=abc",
+                DynatraceProvider.extractSseUrl(config, "https://cdn.fallback.com"));
+    }
+
+    @Test
+    void extractSseUrl_endpointWithoutOriginAndNoFallbackReturnsNull() {
+        String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\",\"endpoint\":"
+                + "{\"requestUri\":\"/stream?ch=abc\"}}]}";
+        assertNull(DynatraceProvider.extractSseUrl(config, null));
+    }
+
+    @Test
+    void extractSseUrl_directUrlTakesPrecedenceOverEndpoint() {
+        String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\","
+                + "\"url\":\"https://direct.example.com/sse\","
+                + "\"endpoint\":{\"origin\":\"https://other.example.com\",\"requestUri\":\"/stream\"}}]}";
+        assertEquals("https://direct.example.com/sse",
+                DynatraceProvider.extractSseUrl(config, "https://cdn.example.com"));
+    }
+
+    @Test
     void sseEnabledByDefault() {
         DynatraceProviderOptions opts = DynatraceProviderOptions.builder().build();
         assertTrue(opts.isSseEnabled());

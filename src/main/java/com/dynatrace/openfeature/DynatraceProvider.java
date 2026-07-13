@@ -301,7 +301,9 @@ public final class DynatraceProvider extends EventProvider {
 
         // open SSE connection (spec §3.1 step 3)
         if (sseEnabled) {
-            String sseUrl = extractSseUrl(body);
+            java.net.URI cdnUri = java.net.URI.create(cdnUrl);
+            String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
+            String sseUrl = extractSseUrl(body, cdnOrigin);
             if (sseUrl != null) {
                 SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
                 try {
@@ -614,14 +616,20 @@ public final class DynatraceProvider extends EventProvider {
     // -- utilities --
 
     /**
-     * Extracts the SSE URL from the CDN config JSON.
+     * Extracts the SSE URL from the CDN config JSON, using {@code fallbackOrigin} as the base
+     * URL origin when the stream entry uses a structured {@code endpoint} with no explicit origin.
      *
      * <p>Looks for the first entry in {@code eventStreams} with {@code type == "sse"}.
      * Returns null if the field is absent or no SSE entry is present.
      */
-    static String extractSseUrl(String configJson) {
+    static String extractSseUrl(String configJson, String fallbackOrigin) {
         CdnConfigJSON config = CdnConfigJSON.parse(configJson);
-        return config != null ? config.sseUrl() : null;
+        return config != null ? config.sseUrl(fallbackOrigin) : null;
+    }
+
+    /** Overload for callers that only have the raw URL approach (no structured endpoint). */
+    static String extractSseUrl(String configJson) {
+        return extractSseUrl(configJson, null);
     }
 
     private static HttpClient buildDefaultHttpClient() {
