@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.2-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.1-alpha...v0.4.2-alpha) (2026-07-13)
+
+
+### ✨ New Features
+
+* **sse:** SSE Support ([#11](https://github.com/Dynatrace/openfeature-provider-java/issues/11)) ([9f3c614](https://github.com/Dynatrace/openfeature-provider-java/commit/9f3c61442c75c76d7a3e77a8f2d6d8b2c3f9541b))
+
+
+### 🧹 Chore
+
+* **deps:** bump com.fasterxml.jackson.core:jackson-databind from 2.21.2 to 2.22.0 ([#20](https://github.com/Dynatrace/openfeature-provider-java/issues/20)) ([932a218](https://github.com/Dynatrace/openfeature-provider-java/commit/932a2187da40a59bc6b9557a136d1d0c6cb70482))
+
 ## [0.4.1-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.0-alpha...v0.4.1-alpha) (2026-06-01)
 
 
