@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Duration;
@@ -206,7 +207,7 @@ public final class DynatraceProvider extends EventProvider {
         String trimmed = m.group(0);
         String type = m.group(2);
         String geo = m.group(3);
-        java.net.URI override = options != null ? options.getConfigOrigin() : null;
+        URI override = options != null ? options.getConfigOrigin() : null;
         String base = override != null
                 ? override.getScheme() + "://" + override.getAuthority() + "/" + type + "/"
                 : "https://cdn." + geo + ".fm.dynatrace.com/" + type + "/";
@@ -264,7 +265,7 @@ public final class DynatraceProvider extends EventProvider {
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
-        String host = java.net.URI.create(cdnUrl).getHost();
+        String host = URI.create(cdnUrl).getHost();
         log.info("initializing Dynatrace feature flag provider (host={})", host);
 
         FetchResult result;
@@ -301,7 +302,7 @@ public final class DynatraceProvider extends EventProvider {
 
         // open SSE connection (spec §3.1 step 3)
         if (sseEnabled) {
-            java.net.URI cdnUri = java.net.URI.create(cdnUrl);
+            URI cdnUri = URI.create(cdnUrl);
             String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
             String sseUrl = extractSseUrl(body, cdnOrigin);
             if (sseUrl != null) {
