@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.3-alpha...v0.4.4-alpha) (2026-07-17)
+
+
+### 🐛 Bug Fixes
+
+* ICP-4502: Fix message body parsing to allow nested `.data` ([#23](https://github.com/Dynatrace/openfeature-provider-java/issues/23)) ([e316d03](https://github.com/Dynatrace/openfeature-provider-java/commit/e316d033dd484b0fce5cb534f2a90dd0d8eea3e9))
+
 ## [0.4.3-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.2-alpha...v0.4.3-alpha) (2026-07-13)
 
 
