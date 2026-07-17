@@ -54,6 +54,24 @@ class SseManagerTest {
         BackgroundEventHandler handler = mgr.createHandler();
 
         handler.onMessage("flag-update", new MessageEvent(
+                "{\"id\":\"7lSGcw-zwS:0:0\",\"timestamp\":1784320863017,\"name\":\"refetchConfig\"," +
+                "\"channel\":\"test-channel\",\"action\":0," +
+                "\"data\":\"{\\\"type\\\":\\\"refetchConfig\\\",\\\"etag\\\":\\\"\\\\\\\"abc123\\\\\\\"\\\",\\\"lastModified\\\":1771622898}\"}"));
+
+        SseMessage msg = received.get();
+        assertNotNull(msg);
+        assertEquals("refetchConfig", msg.type);
+        assertEquals("\"abc123\"", msg.etag);
+        assertEquals(1771622898L, msg.lastModified);
+    }
+
+    @Test
+    void onMessageParsesFlat() throws Exception {
+        AtomicReference<SseMessage> received = new AtomicReference<>();
+        SseManager mgr = new SseManager(SSE_URL, () -> {}, () -> {}, received::set);
+        BackgroundEventHandler handler = mgr.createHandler();
+
+        handler.onMessage("flag-update", new MessageEvent(
                 "{\"type\":\"refetchConfig\",\"etag\":\"\\\"abc123\\\"\",\"lastModified\":1771622898}"));
 
         SseMessage msg = received.get();
@@ -80,7 +98,8 @@ class SseManagerTest {
         SseManager mgr = new SseManager(SSE_URL, () -> {}, () -> {}, m -> messages.incrementAndGet());
         BackgroundEventHandler handler = mgr.createHandler();
 
-        handler.onMessage("flag-update", new MessageEvent("{\"lastModified\":1}"));
+        handler.onMessage("flag-update", new MessageEvent(
+                "{\"data\":\"{\\\"lastModified\\\":1}\"}"));
 
         assertEquals(0, messages.get());
     }
@@ -124,7 +143,8 @@ class SseManagerTest {
                 disconnected::incrementAndGet, m -> messages.incrementAndGet());
         BackgroundEventHandler handler = mgr.createHandler();
 
-        handler.onMessage("update", new MessageEvent("{\"type\":\"refetchConfig\"}"));
+        handler.onMessage("update", new MessageEvent(
+                "{\"data\":\"{\\\"type\\\":\\\"refetchConfig\\\"}\"}"));
 
         assertEquals(0, connected.get());
         assertEquals(0, disconnected.get());

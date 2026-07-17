@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
@@ -27,7 +28,9 @@ final class SseMessage {
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-    /** Server-side signal to re-fetch the flagd config JSON from the CDN. */
+    /**
+     * Server-side signal to re-fetch the flagd config JSON from the CDN.
+     */
     static final String TYPE_REFETCH_CONFIG = "refetchConfig";
 
     final String type;
@@ -45,15 +48,27 @@ final class SseMessage {
     }
 
     /**
-     * Parses an SSE message envelope. Returns {@code null} if the payload is not valid JSON
-     * or lacks a non-blank {@code type} field — callers should treat null as "unrecognized".
+     * Parses an SSE payload in either of two shapes:
+     * <ul>
+     *   <li>Ably envelope — outer JSON object with a {@code data} field that is a JSON-encoded
+     *       string containing the actual message.</li>
+     *   <li>Flat — the message fields ({@code type}, {@code etag}, {@code lastModified}, etc.) are at the root
+     *       as per the OFREP spec.</li>
+     * </ul>
+     * Returns {@code null} if the payload is not valid JSON or the resolved message lacks a
+     * non-blank {@code type} field.
      */
-    static SseMessage parse(String data) {
-        if (data == null || data.isBlank()) {
+    static SseMessage parse(String payload) {
+        if (payload == null || payload.isBlank()) {
             return null;
         }
         try {
-            SseMessage msg = MAPPER.readValue(data, SseMessage.class);
+            JsonNode outer = MAPPER.readTree(payload);
+            JsonNode dataNode = outer.get("data");
+            String innerJson = (dataNode != null && dataNode.isTextual())
+                    ? dataNode.asText()
+                    : payload;
+            SseMessage msg = MAPPER.readValue(innerJson, SseMessage.class);
             if (msg.type == null || msg.type.isBlank()) {
                 return null;
             }
