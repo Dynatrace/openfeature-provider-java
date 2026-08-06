@@ -19,6 +19,34 @@ mvn test -P '!deploy'
 
 Tests use OkHttp `MockWebServer` for HTTP interactions; no network access is required.
 
+### End-to-end acceptance tests
+
+Black-box acceptance tests drive the real `DynatraceProvider` through the OpenFeature SDK against a
+**containerized mock backend**, using the shared, cross-provider Gherkin spec.
+
+- **Spec:** the `gherkin/` feature files come from the [`fm-provider-test-harness`](fm-provider-test-harness)
+  git submodule (the same spec used by the Java, Go and Python providers). See the submodule for the
+  spec and the mock-backend endpoint contract.
+- **Containerized:** one [Testcontainers](https://testcontainers.com/)-managed mock backend emulates
+  every component the provider talks to; each scenario resets it for isolation. Requires Docker.
+- **Implementation:** [`src/test/java/com/dynatrace/openfeature/e2e`](src/test/java/com/dynatrace/openfeature/e2e)
+  — the JUnit Platform Suite runner, Cucumber step definitions, and the mock-backend client.
+
+Excluded from the default unit build (`mvn test`). Run with the `e2e` profile, which syncs the
+submodule to its pinned commit first:
+
+```bash
+mvn test -Pe2e
+```
+
+Override the mock-backend image via the `mockserver.image` system property (or `MOCKSERVER_IMAGE`
+env var); skip the submodule sync while iterating on the spec locally with `-Dtestharness.skipUpdate=true`:
+
+```bash
+mvn test -Pe2e -Dmockserver.image=ghcr.io/dynatrace/openfeature-provider-mock-backend:1.4.0
+mvn test -Pe2e -Dtestharness.skipUpdate=true
+```
+
 ## Code style
 
 - Follow existing conventions in the codebase.
