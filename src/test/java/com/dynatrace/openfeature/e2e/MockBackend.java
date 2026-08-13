@@ -38,7 +38,7 @@ final class MockBackend {
 
     /** Default image coordinate; override via -Dmockserver.image=... or MOCKSERVER_IMAGE=... */
     private static final String DEFAULT_IMAGE =
-            "ghcr.io/dynatrace/openfeature-provider-mock-backend:latest";
+            "ghcr.io/dynatrace/fm-provider-mock-server:latest";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

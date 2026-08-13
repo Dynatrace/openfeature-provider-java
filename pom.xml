@@ -235,6 +235,8 @@
                                         <argument>submodule</argument>
                                         <argument>update</argument>
                                         <argument>--init</argument>
+                                        <argument>--remote</argument>
+                                        <argument>--force</argument>
                                         <argument>fm-provider-test-harness</argument>
                                     </arguments>
                                 </configuration>

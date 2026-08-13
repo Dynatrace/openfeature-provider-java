@@ -204,9 +204,9 @@ public class CdnStepDefinitions {
                 "initial request unexpectedly carried header: " + header);
     }
 
-    @Then("the second CDN request has the {string} header {string}")
-    public void theSecondCdnRequestHasHeader(String header, String value) {
-        RecordedRequest second = nthCdnRequest(1);
+    @Then("the {}. CDN request has the {string} header {string}")
+    public void theSecondCdnRequestHasHeader(int index, String header, String value) {
+        RecordedRequest second = nthCdnRequest(index-1);
         assertTrue(second.hasHeader(header),
                 "second CDN request missing expected header: " + header);
         assertEquals(value, second.header(header),
@@ -221,10 +221,9 @@ public class CdnStepDefinitions {
                 "expected provider READY after an initial " + status + " fetch");
     }
 
-    @Then("the CDN received at least {int} requests")
+    @Then("the CDN received {int} requests")
     public void theCdnReceivedAtLeastXRequests(int count) {
-        assertTrue(backend.cdnRequestCount() >= count,
-                "expected >= " + count + " CDN requests, saw " + backend.cdnRequestCount());
+        assertEquals(backend.cdnRequestCount(), count, "expected " + count + " CDN requests, saw " + backend.cdnRequestCount());
     }
 
     @Then("the CDN receives no further requests while rate-limited")
