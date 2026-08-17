@@ -601,6 +601,46 @@ class DynatraceProviderTest {
     }
 
     @Test
+    void builderRejectsNonOriginConfigOrigin() {
+        String[][] cases = {
+                {"https://cdn.example.com?tenant=x", "query string"},
+                {"https://cdn.example.com#frag", "fragment"},
+                {"https://user:pass@cdn.example.com", "user info"},
+                {"ftp://cdn.example.com", "http or https"},
+                {"cdn.example.com", "http or https"},
+                {"https://cdn.example.com:notaport", "valid host and port"},
+        };
+        for (String[] c : cases) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> DynatraceProviderOptions.builder().configOrigin(c[0]),
+                    "expected rejection for " + c[0]);
+            assertTrue(e.getMessage().contains(c[1]),
+                    "for " + c[0] + " expected message containing \"" + c[1] + "\" but got: " + e.getMessage());
+        }
+        // an empty authority is not a parseable URI at all
+        assertThrows(IllegalArgumentException.class, () ->
+                DynatraceProviderOptions.builder().configOrigin("https://"));
+    }
+
+    @Test
+    void configOriginIsNormalised() {
+        String suffix = "/server/dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json";
+        String[][] cases = {
+                {"http://localhost:8080", "http://localhost:8080"},
+                {"https://cdn.example.com//", "https://cdn.example.com"},
+                {"HTTPS://CDN.Example.com", "https://cdn.example.com"},
+                // IPv6 literals must keep their brackets, or the URL is unusable.
+                {"http://[::1]:8080", "http://[::1]:8080"},
+                {"https://[2001:db8::1]", "https://[2001:db8::1]"},
+        };
+        for (String[] c : cases) {
+            assertEquals(c[1] + suffix, DynatraceProvider.buildCdnUrl(TEST_KEY,
+                    DynatraceProviderOptions.builder().configOrigin(c[0]).build()),
+                    "normalising " + c[0]);
+        }
+    }
+
+    @Test
     void shutdownBeforeInitializeIsSafe() {
         DynatraceProvider p = provider();
         assertDoesNotThrow(p::shutdown);
