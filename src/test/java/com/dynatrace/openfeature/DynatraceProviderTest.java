@@ -605,7 +605,6 @@ class DynatraceProviderTest {
         String[][] cases = {
                 {"https://cdn.example.com?tenant=x", "query string"},
                 {"https://cdn.example.com#frag", "fragment"},
-                {"https://user:pass@cdn.example.com", "user info"},
                 {"ftp://cdn.example.com", "http or https"},
                 {"cdn.example.com", "http or https"},
                 {"https://cdn.example.com:notaport", "valid host and port"},

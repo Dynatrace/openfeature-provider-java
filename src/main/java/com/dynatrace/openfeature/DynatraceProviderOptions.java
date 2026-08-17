@@ -110,9 +110,9 @@ public final class DynatraceProviderOptions {
          * Validates that {@code value} is a bare origin and returns it in canonical form.
          *
          * <p>An origin is a scheme, host, and optional port — nothing else. Rebuilding from the
-         * parsed parts (rather than trimming the raw string) keeps a query, fragment, or user
-         * info from silently corrupting the platform and key segments appended later, which
-         * would surface only as a 404 on the first config fetch.
+         * parsed parts (rather than trimming the raw string) keeps a query or fragment from
+         * silently corrupting the platform and key segments appended later, which would
+         * surface only as a 404 on the first config fetch.
          */
         private static URI normaliseConfigOrigin(String value) {
             URI uri;
@@ -146,15 +146,15 @@ public final class DynatraceProviderOptions {
                 throw new IllegalArgumentException(
                         "configOrigin must not include a fragment; got: \"" + value + "\"");
             }
-            if (uri.getUserInfo() != null) {
-                throw new IllegalArgumentException(
-                        "configOrigin must not include user info; got: \"" + value + "\"");
+            // The multi-arg constructor assembles the authority itself, including the brackets
+            // around an IPv6 host. Passing null user info drops any credentials rather than
+            // carrying them into the request URL.
+            try {
+                return new URI(scheme.toLowerCase(Locale.ROOT), null,
+                        uri.getHost().toLowerCase(Locale.ROOT), uri.getPort(), null, null, null);
+            } catch (URISyntaxException e) {
+                throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
             }
-            // getHost() keeps the brackets around an IPv6 literal, so this stays a valid URI.
-            String origin = scheme.toLowerCase(Locale.ROOT) + "://"
-                    + uri.getHost().toLowerCase(Locale.ROOT)
-                    + (uri.getPort() == -1 ? "" : ":" + uri.getPort());
-            return URI.create(origin);
         }
 
         /**
