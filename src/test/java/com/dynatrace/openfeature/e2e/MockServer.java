@@ -20,20 +20,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Client for the containerized mock backend that emulates every component the provider talks to
+ * Client for the containerized mock server that emulates every component the provider talks to
  * (CDN config endpoint, SSE and metrics ingest), plus an HTTP control plane to script responses
  * and inspect received requests.
- *
- * <p>The backend is published as a versioned image; its coordinate is read from the
- * {@code mockserver.image} system property or {@code MOCKSERVER_IMAGE} environment variable. The
- * container is a JVM-wide singleton (Testcontainers' Ryuk reaps it at exit); each scenario calls
- * {@link #reset()} for isolation.
- *
- * <p>See {@code README.md} in this package for the full control-API contract.
  */
-final class MockBackend {
+final class MockServer {
 
-    /** Port the mock backend listens on inside the container. */
+    /** Port the mock server listens on inside the container. */
     private static final int CONTAINER_PORT = 8080;
 
     /** Default image coordinate; override via -Dmockserver.image=... or MOCKSERVER_IMAGE=... */
@@ -47,17 +40,17 @@ final class MockBackend {
     private final HttpClient http = HttpClient.newHttpClient();
     private final String baseUrl;
 
-    private MockBackend(String baseUrl) {
+    private MockServer(String baseUrl) {
         this.baseUrl = baseUrl;
     }
 
     /** Lazily starts the singleton container (if needed) and returns a client bound to it. */
-    static synchronized MockBackend get() {
+    static synchronized MockServer get() {
         if (container == null || !container.isRunning()) {
             container = startContainer();
         }
         String base = "http://" + container.getHost() + ":" + container.getMappedPort(CONTAINER_PORT);
-        return new MockBackend(base);
+        return new MockServer(base);
     }
 
     /** True if the container has already been started (used by hooks to reset only when relevant). */

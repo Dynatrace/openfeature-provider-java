@@ -22,12 +22,12 @@ Tests use OkHttp `MockWebServer` for HTTP interactions; no network access is req
 ### End-to-end acceptance tests
 
 Black-box acceptance tests drive the real `DynatraceProvider` through the OpenFeature SDK against a
-**containerized mock backend**, using the shared, cross-provider Gherkin spec.
+**containerized mock server**, using the shared, cross-provider Gherkin spec.
 
 - **Spec:** the `gherkin/` feature files come from the [`fm-provider-test-harness`](fm-provider-test-harness)
   git submodule (the same spec used by the Java, Go and Python providers). See the submodule for the
   spec and the mock-backend endpoint contract.
-- **Containerized:** one [Testcontainers](https://testcontainers.com/)-managed mock backend emulates
+- **Containerized:** one [Testcontainers](https://testcontainers.com/)-managed mock server emulates
   every component the provider talks to; each scenario resets it for isolation. Requires Docker.
 - **Implementation:** [`src/test/java/com/dynatrace/openfeature/e2e`](src/test/java/com/dynatrace/openfeature/e2e)
   — the JUnit Platform Suite runner, Cucumber step definitions, and the mock-backend client.
@@ -39,7 +39,7 @@ submodule to its pinned commit first:
 mvn test -Pe2e
 ```
 
-Override the mock-backend image via the `mockserver.image` system property (or `MOCKSERVER_IMAGE`
+Override the mock-server image via the `mockserver.image` system property (or `MOCKSERVER_IMAGE`
 env var); skip the submodule sync while iterating on the spec locally with `-Dtestharness.skipUpdate=true`:
 
 ```bash
