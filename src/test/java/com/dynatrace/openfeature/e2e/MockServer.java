@@ -9,10 +9,13 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,9 +32,11 @@ final class MockServer {
     /** Port the mock server listens on inside the container. */
     private static final int CONTAINER_PORT = 8080;
 
-    /** Default image coordinate; override via -Dmockserver.image=... or MOCKSERVER_IMAGE=... */
-    private static final String DEFAULT_IMAGE =
-            "ghcr.io/dynatrace/fm-provider-mock-server:latest";
+    /** Mock server image repository; the tag comes from the pinned harness's version.txt. */
+    private static final String IMAGE_REPO = "ghcr.io/dynatrace/fm-provider-mock-server";
+
+    /** Classpath location of the harness's version.txt (see the testResource in pom.xml). */
+    private static final String VERSION_RESOURCE = "/testharness/version.txt";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -58,9 +63,32 @@ final class MockServer {
         return container != null && container.isRunning();
     }
 
+    /**
+     * Resolves the image from the pinned submodule's version.txt, so the mock server can never drift
+     * from the spec commit the harness is pinned to. Override with -Dmockserver.image=... or
+     * MOCKSERVER_IMAGE=... (e.g. to run a locally built image).
+     */
+    private static String defaultImage() {
+        try (InputStream in = MockServer.class.getResourceAsStream(VERSION_RESOURCE)) {
+            if (in == null) {
+                throw new IllegalStateException(
+                        "missing " + VERSION_RESOURCE + " on the test classpath; run `git submodule"
+                                + " update --init fm-provider-test-harness`");
+            }
+            return IMAGE_REPO + ":v" + new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
+        } catch (IOException e) {
+            throw new UncheckedIOException("could not read " + VERSION_RESOURCE, e);
+        }
+    }
+
     private static GenericContainer<?> startContainer() {
-        String image = System.getProperty("mockserver.image",
-                System.getenv().getOrDefault("MOCKSERVER_IMAGE", DEFAULT_IMAGE));
+        String image = System.getProperty("mockserver.image");
+        if (image == null) {
+            image = System.getenv("MOCKSERVER_IMAGE");
+        }
+        if (image == null) {
+            image = defaultImage();
+        }
         GenericContainer<?> c = new GenericContainer<>(DockerImageName.parse(image))
                 .withExposedPorts(CONTAINER_PORT)
                 .waitingFor(Wait.forHttp("/__control__/health").forStatusCode(200))

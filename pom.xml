@@ -170,6 +170,16 @@
                 <directory>fm-provider-test-harness/gherkin</directory>
                 <targetPath>gherkin</targetPath>
             </testResource>
+            <!-- The harness's version.txt is bumped atomically with its release tag, so the pinned
+                 submodule commit determines the mock server image tag. Put it on the test classpath
+                 so MockServer resolves the image without depending on the working directory. -->
+            <testResource>
+                <directory>fm-provider-test-harness</directory>
+                <targetPath>testharness</targetPath>
+                <includes>
+                    <include>version.txt</include>
+                </includes>
+            </testResource>
         </testResources>
         <plugins>
             <plugin>
@@ -235,7 +245,6 @@
                                         <argument>submodule</argument>
                                         <argument>update</argument>
                                         <argument>--init</argument>
-                                        <argument>--remote</argument>
                                         <argument>--force</argument>
                                         <argument>fm-provider-test-harness</argument>
                                     </arguments>
