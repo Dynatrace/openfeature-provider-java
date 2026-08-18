@@ -44,11 +44,32 @@
         <!-- Aligned with the version flagd-core already pulls in transitively; declared
              explicitly so we don't silently break if flagd-core changes its Jackson dep. -->
         <jackson.version>2.22.1</jackson.version>
-        <junit.version>5.11.4</junit.version>
+        <junit.version>5.13.4</junit.version>
+        <junit-platform-suite.version>1.13.4</junit-platform-suite.version>
         <okhttp.version>4.12.0</okhttp.version><!-- test only; mockwebserver -->
         <mockito.version>5.15.2</mockito.version>
         <slf4j.version>2.0.16</slf4j.version>
+        <cucumber.version>7.34.3</cucumber.version>
+        <testcontainers.version>2.0.4</testcontainers.version>
+        <docker.api.version>1.41</docker.api.version>
+
+        <!-- When true, the e2e profile skips the `git submodule update` - for local testing -->
+        <testharness.skipUpdate>false</testharness.skipUpdate>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Aligns all JUnit Platform artifacts (transitively pulled by Cucumber's engine and
+                 the platform-suite engine) to one consistent version. -->
+            <dependency>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>${junit.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
@@ -109,9 +130,57 @@
             <version>${slf4j.version}</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>io.cucumber</groupId>
+            <artifactId>cucumber-java</artifactId>
+            <version>${cucumber.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.cucumber</groupId>
+            <artifactId>cucumber-junit-platform-engine</artifactId>
+            <version>${cucumber.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-suite</artifactId>
+            <version>${junit-platform-suite.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <version>${testcontainers.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
+        <testResources>
+            <!-- keep the default test resources -->
+            <testResource>
+                <directory>src/test/resources</directory>
+            </testResource>
+            <!-- Put the shared Gherkin spec (from the fm-provider-test-harness git submodule at the
+                 repo root) on the test classpath so the Cucumber suite discovers it via
+                 @SelectClasspathResource, independent of the working directory (works the same in
+                 IDEs and Maven). -->
+            <testResource>
+                <directory>fm-provider-test-harness/gherkin</directory>
+                <targetPath>gherkin</targetPath>
+            </testResource>
+            <!-- The harness's version.txt is bumped atomically with its release tag, so the pinned
+                 submodule commit determines the mock server image tag. Put it on the test classpath
+                 so MockServer resolves the image without depending on the working directory. -->
+            <testResource>
+                <directory>fm-provider-test-harness</directory>
+                <targetPath>testharness</targetPath>
+                <includes>
+                    <include>version.txt</include>
+                </includes>
+            </testResource>
+        </testResources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -124,9 +193,15 @@
                 <version>3.5.2</version>
                 <configuration>
                     <!--
-                        Remove once mockito-core is bumped to a release that officially supports the project's target JDK.  
+                        Remove once mockito-core is bumped to a release that officially supports the project's target JDK.
                     -->
                     <argLine>-Dnet.bytebuddy.experimental=true</argLine>
+                    <!--
+                        E2E tests are excluded, run them separately with `mvn test -Pe2e`.
+                    -->
+                    <excludes>
+                        <exclude>**/e2e/**</exclude>
+                    </excludes>
                 </configuration>
             </plugin>
             <!-- Adds Implementation-Version to the jar manifest for packaged deployments. -->
@@ -145,6 +220,53 @@
     </build>
 
     <profiles>
+        <!--
+            Runs the e2e provider tests. Usage: `mvn test -Pe2e`.
+        -->
+        <profile>
+            <id>e2e</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>update-test-harness-submodule</id>
+                                <phase>validate</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <skip>${testharness.skipUpdate}</skip>
+                                    <executable>git</executable>
+                                    <arguments>
+                                        <argument>submodule</argument>
+                                        <argument>update</argument>
+                                        <argument>--init</argument>
+                                        <argument>--force</argument>
+                                        <argument>fm-provider-test-harness</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <argLine>-Dnet.bytebuddy.experimental=true</argLine>
+                            <excludes combine.self="override"/>
+                            <includes>
+                                <include>**/e2e/RunCdnAcceptanceTest.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
         <profile>
             <id>deploy</id>
             <activation>
