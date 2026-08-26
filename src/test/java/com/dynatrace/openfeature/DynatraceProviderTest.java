@@ -161,7 +161,7 @@ class DynatraceProviderTest {
 
             DynatraceProviderOptions options = DynatraceProviderOptions.builder()
                     .configOrigin(server.url("/").toString().replaceAll("/+$", ""))
-                    .metricsUrl(metricsServer.url("/v1/metrics").toString())
+                    .metricsOrigin(metricsServer.url("/").toString().replaceAll("/+$", ""))
                     .metricsFlushInterval(Duration.ofHours(1)) // no periodic flush during the test
                     .build();
             DynatraceProvider p = new DynatraceProvider(TEST_KEY, options, new FlagdCore(), httpClient);
@@ -227,7 +227,7 @@ class DynatraceProviderTest {
 
             DynatraceProviderOptions options = DynatraceProviderOptions.builder()
                     .configOrigin(server.url("/").toString().replaceAll("/+$", ""))
-                    .metricsUrl(metricsServer.url("/v1/metrics").toString())
+                    .metricsOrigin(metricsServer.url("/").toString().replaceAll("/+$", ""))
                     .metricsFlushInterval(Duration.ofMinutes(5))
                     .build();
 
@@ -258,7 +258,7 @@ class DynatraceProviderTest {
 
             DynatraceProviderOptions options = DynatraceProviderOptions.builder()
                     .configOrigin(server.url("/").toString().replaceAll("/+$", ""))
-                    .metricsUrl(metricsServer.url("/v1/metrics").toString())
+                    .metricsOrigin(metricsServer.url("/").toString().replaceAll("/+$", ""))
                     .metricsFlushInterval(Duration.ofMinutes(5)) // periodic flush should not fire during the test
                     .build();
             DynatraceProvider p = new DynatraceProvider(TEST_KEY, options, new FlagdCore(), httpClient);
@@ -302,29 +302,47 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void metricsUrlOverrideUsesFullEndpoint() {
+    void metricsOriginOverrideAppendsMetricsPath() {
         DynatraceProviderOptions options = DynatraceProviderOptions.builder()
-                .metricsUrl("https://metrics.example.com/custom/metrics")
+                .metricsOrigin("https://metrics.example.com")
                 .build();
-        assertEquals("https://metrics.example.com/custom/metrics",
+        assertEquals("https://metrics.example.com/v1/metrics",
                 DynatraceProvider.buildMetricsUrl(TEST_KEY, options));
+        assertEquals("https://metrics.example.com/v1/metrics",
+                DynatraceProvider.buildMetricsUrl(TEST_KEY,
+                        DynatraceProviderOptions.builder().metricsOrigin("https://metrics.example.com/").build()));
+        assertEquals("https://metrics.example.com:443/v1/metrics",
+                DynatraceProvider.buildMetricsUrl(TEST_KEY,
+                        DynatraceProviderOptions.builder().metricsOrigin("https://metrics.example.com:443").build()));
     }
 
     @Test
-    void metricsUrlOverrideTrimsWhitespace() {
+    void metricsOriginOverrideTrimsWhitespace() {
         DynatraceProviderOptions options = DynatraceProviderOptions.builder()
-                .metricsUrl("  https://metrics.example.com/v1/metrics  ")
+                .metricsOrigin("  https://metrics.example.com  ")
                 .build();
         assertEquals("https://metrics.example.com/v1/metrics",
                 DynatraceProvider.buildMetricsUrl(TEST_KEY, options));
     }
 
     @Test
-    void builderRejectsBlankMetricsUrl() {
+    void builderRejectsBlankMetricsOrigin() {
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder().metricsUrl(""));
+                DynatraceProviderOptions.builder().metricsOrigin(""));
         assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder().metricsUrl(null));
+                DynatraceProviderOptions.builder().metricsOrigin(null));
+    }
+
+    @Test
+    void builderRejectsMetricsOriginWithPath() {
+        for (String origin : new String[] {
+                "https://metrics.example.com/v1/metrics",
+                "https://metrics.example.com//",
+                "https://metrics.example.com/..",
+        }) {
+            assertThrows(IllegalArgumentException.class, () ->
+                    DynatraceProviderOptions.builder().metricsOrigin(origin), origin);
+        }
     }
 
     @Test

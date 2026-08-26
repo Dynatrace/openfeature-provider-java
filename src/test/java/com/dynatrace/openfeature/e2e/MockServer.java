@@ -97,14 +97,9 @@ final class MockServer {
         return c;
     }
 
-    /** Origin (scheme://host:port, no path) the provider is pointed at via {@code configOrigin}. */
+    /** Origin (scheme://host:port, no path) the provider is pointed at via {@code configOrigin} and {@code metricsOrigin}. */
     String origin() {
         return baseUrl;
-    }
-
-    /** Metrics ingest URL the provider is pointed at so no real metrics endpoint is contacted. */
-    String metricsUrl() {
-        return baseUrl + "/v1/metrics";
     }
 
     /** Clears programmed CDN responses, recorded requests and rate-limit state. */
