@@ -607,7 +607,8 @@ class DynatraceProviderTest {
                 {"https://cdn.example.com#frag", "fragment"},
                 {"ftp://cdn.example.com", "http or https"},
                 {"cdn.example.com", "http or https"},
-                {"https://cdn.example.com:notaport", "valid host and port"},
+                {"https://cdn.example.com:notaport", "valid host"},
+                {"https://user:pass@cdn.example.com", "user info"},
         };
         for (String[] c : cases) {
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class,

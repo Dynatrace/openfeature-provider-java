@@ -131,7 +131,7 @@ public final class DynatraceProviderOptions {
             // that makes the authority registry-based rather than server-based.
             if (uri.getHost() == null) {
                 throw new IllegalArgumentException(
-                        "configOrigin must include a valid host and port; got: \"" + value + "\"");
+                        "configOrigin must include a valid host; got: \"" + value + "\"");
             }
             String path = uri.getPath();
             if (path != null && !path.isEmpty() && !path.replaceAll("/+$", "").isEmpty()) {
@@ -146,9 +146,12 @@ public final class DynatraceProviderOptions {
                 throw new IllegalArgumentException(
                         "configOrigin must not include a fragment; got: \"" + value + "\"");
             }
+            if (uri.getUserInfo() != null) {
+                throw new IllegalArgumentException(
+                        "configOrigin must not include user info; got: \"" + value + "\"");
+            }
             // The multi-arg constructor assembles the authority itself, including the brackets
-            // around an IPv6 host. Passing null user info drops any credentials rather than
-            // carrying them into the request URL.
+            // around an IPv6 host.
             try {
                 return new URI(scheme.toLowerCase(Locale.ROOT), null,
                         uri.getHost().toLowerCase(Locale.ROOT), uri.getPort(), null, null, null);
