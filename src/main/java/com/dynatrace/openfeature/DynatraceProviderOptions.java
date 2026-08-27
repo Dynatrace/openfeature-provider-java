@@ -127,12 +127,6 @@ public final class DynatraceProviderOptions {
                 throw new IllegalArgumentException(
                         "configOrigin must use http or https; got: \"" + value + "\"");
             }
-            // getHost() is null for a malformed authority — an empty host, or a non-numeric port
-            // that makes the authority registry-based rather than server-based.
-            if (uri.getHost() == null) {
-                throw new IllegalArgumentException(
-                        "configOrigin must include a valid host; got: \"" + value + "\"");
-            }
             String path = uri.getPath();
             if (path != null && !path.isEmpty() && !path.replaceAll("/+$", "").isEmpty()) {
                 throw new IllegalArgumentException(
@@ -150,11 +144,27 @@ public final class DynatraceProviderOptions {
                 throw new IllegalArgumentException(
                         "configOrigin must not include user info; got: \"" + value + "\"");
             }
-            // The multi-arg constructor assembles the authority itself, including the brackets
-            // around an IPv6 host.
             try {
-                return new URI(scheme.toLowerCase(Locale.ROOT), null,
-                        uri.getHost().toLowerCase(Locale.ROOT), uri.getPort(), null, null, null);
+                if (uri.getHost() != null) {
+                    // The multi-arg constructor assembles the authority itself, including the
+                    // brackets around an IPv6 host.
+                    return new URI(scheme.toLowerCase(Locale.ROOT), null,
+                            uri.getHost().toLowerCase(Locale.ROOT), uri.getPort(), null, null, null);
+                }
+                // getHost() is null for underscore hosts (docker-compose service names) and for
+                // a non-numeric port. Fall back to the raw authority so http://my_service:8080
+                // is accepted.
+                String authority = uri.getRawAuthority();
+                if (authority == null || authority.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "configOrigin must include a valid host; got: \"" + value + "\"");
+                }
+                return new URI(
+                        scheme.toLowerCase(Locale.ROOT),
+                        authority.toLowerCase(Locale.ROOT),
+                        null,
+                        null,
+                        null);
             } catch (URISyntaxException e) {
                 throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
             }
