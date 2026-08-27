@@ -3,6 +3,7 @@ package com.dynatrace.openfeature;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
+import java.util.Locale;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -101,18 +102,72 @@ public final class DynatraceProviderOptions {
                 throw new IllegalArgumentException("configOrigin must not be null or blank");
             }
             String stripped = configOrigin.strip();
+            this.configOrigin = normaliseConfigOrigin(stripped);
+            return this;
+        }
+
+        /**
+         * Validates that {@code value} is a bare origin and returns it in canonical form.
+         *
+         * <p>An origin is a scheme, host, and optional port — nothing else. Rebuilding from the
+         * parsed parts (rather than trimming the raw string) keeps a query or fragment from
+         * silently corrupting the platform and key segments appended later, which would
+         * surface only as a 404 on the first config fetch.
+         */
+        private static URI normaliseConfigOrigin(String value) {
+            URI uri;
             try {
-                URI uri = new URI(stripped);
-                String path = uri.getPath();
-                if (path != null && !path.isEmpty() && !path.equals("/")) {
-                    throw new IllegalArgumentException(
-                            "configOrigin must not include a path; got: \"" + stripped + "\"");
-                }
-                this.configOrigin = uri;
+                uri = new URI(value);
             } catch (URISyntaxException e) {
                 throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
             }
-            return this;
+            String scheme = uri.getScheme();
+            if (scheme == null
+                    || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+                throw new IllegalArgumentException(
+                        "configOrigin must use http or https; got: \"" + value + "\"");
+            }
+            String path = uri.getPath();
+            if (path != null && !path.isEmpty() && !path.equals("/")) {
+                throw new IllegalArgumentException(
+                        "configOrigin must not include a path; got: \"" + value + "\"");
+            }
+            if (uri.getQuery() != null) {
+                throw new IllegalArgumentException(
+                        "configOrigin must not include a query string; got: \"" + value + "\"");
+            }
+            if (uri.getFragment() != null) {
+                throw new IllegalArgumentException(
+                        "configOrigin must not include a fragment; got: \"" + value + "\"");
+            }
+            if (uri.getUserInfo() != null) {
+                throw new IllegalArgumentException(
+                        "configOrigin must not include user info; got: \"" + value + "\"");
+            }
+            try {
+                if (uri.getHost() != null) {
+                    // The multi-arg constructor assembles the authority itself, including the
+                    // brackets around an IPv6 host.
+                    return new URI(scheme.toLowerCase(Locale.ROOT), null,
+                            uri.getHost().toLowerCase(Locale.ROOT), uri.getPort(), null, null, null);
+                }
+                // getHost() is null for underscore hosts (docker-compose service names) and for
+                // a non-numeric port. Fall back to the raw authority so http://my_service:8080
+                // is accepted.
+                String authority = uri.getRawAuthority();
+                if (authority == null || authority.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "configOrigin must include a valid host; got: \"" + value + "\"");
+                }
+                return new URI(
+                        scheme.toLowerCase(Locale.ROOT),
+                        authority.toLowerCase(Locale.ROOT),
+                        null,
+                        null,
+                        null);
+            } catch (URISyntaxException e) {
+                throw new IllegalArgumentException("configOrigin is not a valid URI: " + e.getMessage());
+            }
         }
 
         /**
