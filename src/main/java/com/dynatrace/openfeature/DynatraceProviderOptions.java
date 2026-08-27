@@ -128,7 +128,7 @@ public final class DynatraceProviderOptions {
                         "configOrigin must use http or https; got: \"" + value + "\"");
             }
             String path = uri.getPath();
-            if (path != null && !path.isEmpty() && !path.replaceAll("/+$", "").isEmpty()) {
+            if (path != null && !path.isEmpty() && !path.equals("/")) {
                 throw new IllegalArgumentException(
                         "configOrigin must not include a path; got: \"" + value + "\"");
             }

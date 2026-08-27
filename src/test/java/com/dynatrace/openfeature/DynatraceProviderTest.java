@@ -582,6 +582,10 @@ class DynatraceProviderTest {
                 DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/").build()));
         assertEquals(expected, DynatraceProvider.buildCdnUrl(TEST_KEY,
                 DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com").build()));
+        assertEquals("https://cdn.example.com:443/server/"
+                        + "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5.json",
+                DynatraceProvider.buildCdnUrl(TEST_KEY,
+                        DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com:443").build()));
     }
 
     @Test
@@ -594,8 +598,14 @@ class DynatraceProviderTest {
 
     @Test
     void builderRejectsConfigOriginWithPath() {
-        assertThrows(IllegalArgumentException.class, () ->
-                DynatraceProviderOptions.builder().configOrigin("https://cdn.example.com/server"));
+        for (String origin : new String[] {
+                "https://cdn.example.com/server",
+                "https://cdn.example.com//",
+                "https://cdn.example.com/..",
+        }) {
+            assertThrows(IllegalArgumentException.class, () ->
+                    DynatraceProviderOptions.builder().configOrigin(origin), origin);
+        }
     }
 
     @Test
