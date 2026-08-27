@@ -263,7 +263,7 @@ public class CdnStepDefinitions {
         if (provider == null && options == null) {
             options = DynatraceProviderOptions.builder()
                     .configOrigin(mockServer.origin())
-                    .metricsUrl(mockServer.metricsUrl())
+                    .metricsOrigin(mockServer.origin())
                     .metricsFlushInterval(Duration.ofHours(1)) // no periodic metrics flush during a scenario
                     .disableSse()                              // this spec drives refreshes via polling
                     .build();
