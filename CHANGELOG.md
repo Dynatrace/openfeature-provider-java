@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.4-alpha...v0.5.0-alpha) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename metricsUrl to metricsOrigin, accept origin-only value ([#31](https://github.com/Dynatrace/openfeature-provider-java/issues/31))
+
+### ✨ New Features
+
+* rename metricsUrl to metricsOrigin, accept origin-only value ([#31](https://github.com/Dynatrace/openfeature-provider-java/issues/31)) ([e4e8179](https://github.com/Dynatrace/openfeature-provider-java/commit/e4e81797ae5d98454f59d652a06c05f4f36bf58a))
+* **test:** introduce fm-provider-test-harness submodule (ICP-5904) - [#26](https://github.com/Dynatrace/openfeature-provider-java/issues/26) ([#30](https://github.com/Dynatrace/openfeature-provider-java/issues/30)) ([7a07774](https://github.com/Dynatrace/openfeature-provider-java/commit/7a077746373d46b47baf7aed2e7b0e297d1fef4b))
+
+
+### 🐛 Bug Fixes
+
+* validate configOrigin is a bare origin, not just path-free ([#27](https://github.com/Dynatrace/openfeature-provider-java/issues/27)) ([57dd4b8](https://github.com/Dynatrace/openfeature-provider-java/commit/57dd4b86969af663384a3056676ff17accdce223))
+
+
+### 🧹 Chore
+
+* **deps:** bump com.fasterxml.jackson.core:jackson-databind from 2.22.0 to 2.22.1 ([#25](https://github.com/Dynatrace/openfeature-provider-java/issues/25)) ([f4f332e](https://github.com/Dynatrace/openfeature-provider-java/commit/f4f332ea47f673869ef7d34e4d2f9e4dc9d27a0a))
+
 ## [0.4.4-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.3-alpha...v0.4.4-alpha) (2026-07-17)
 
 
