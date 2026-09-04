@@ -64,7 +64,7 @@ public final class LocalDemo {
 
             DynatraceProviderOptions options = DynatraceProviderOptions.builder()
                     .configOrigin("https://cdn.eu.fm.dynatracelabs.com")
-                    .metricsOrigin("https://metrics.eu.fm.dynatrace.com")
+                    .metricsOrigin("https://metrics.eu.fm.dynatracelabs.com")
                     .metricsFlushInterval(Duration.ofSeconds(1)) // suppress periodic flushes
                     .build();
 

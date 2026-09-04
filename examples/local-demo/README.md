@@ -62,26 +62,26 @@ mvn compile exec:java
 
 ## What the demo demonstrates
 
-| File | Purpose |
-|------|---------|
-| `LocalDemo.java` | Starts a local HTTP server, registers `DynatraceProvider` via `configOrigin`, evaluates all flags, and prints a results table |
-| `flag-config.json` | Local flag configuration in flagd format — same flags as the web `react-app` example |
-| `.env.example` | Template for `DT_SDK_KEY` |
+| File               | Purpose                                                                                                                       |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| `LocalDemo.java`   | Starts a local HTTP server, registers `DynatraceProvider` via `configOrigin`, evaluates all flags, and prints a results table |
+| `flag-config.json` | Local flag configuration in flagd format — same flags as the web `react-app` example                                          |
+| `.env.example`     | Template for `DT_SDK_KEY`                                                                                                     |
 
 ### Flags evaluated
 
-| Flag key | Type | Targeting |
-|----------|------|-----------|
-| `simple-boolean` | boolean | context-driven |
-| `simple-string` | string | context-driven |
-| `simple-number` | integer | context-driven |
-| `simple-object` | object | context-driven |
-| `code-default-flag` | boolean | context-driven |
-| `code-default-flag-omitted` | boolean | context-driven |
-| `user-tier-flag` | string | context-driven |
-| `email-based-feature` | boolean | context-driven |
-| `region-config` | object | context-driven |
-| `region-config-api-origin` | string | not in config → FLAG_NOT_FOUND |
+| Flag key                    | Type    | Targeting                      |
+|-----------------------------|---------|--------------------------------|
+| `simple-boolean`            | boolean | context-driven                 |
+| `simple-string`             | string  | context-driven                 |
+| `simple-number`             | integer | context-driven                 |
+| `simple-object`             | object  | context-driven                 |
+| `code-default-flag`         | boolean | context-driven                 |
+| `code-default-flag-omitted` | boolean | context-driven                 |
+| `user-tier-flag`            | string  | context-driven                 |
+| `email-based-feature`       | boolean | context-driven                 |
+| `region-config`             | object  | context-driven                 |
+| `region-config-api-origin`  | string  | not in config → FLAG_NOT_FOUND |
 
 Targeting matches when `email=test@dynatrace.com`, `plan=enterprise`, and
 `region=eu` — the **targeted context**. Any other values hit the default
