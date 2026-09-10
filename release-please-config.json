@@ -8,7 +8,8 @@
             "prerelease": true,
             "prerelease-type": "alpha",
             "extra-files": [
-                "pom.xml"
+                "pom.xml",
+                "README.md"
             ],
             "bump-minor-pre-major": true,
             "bump-patch-for-minor-pre-major": true
