@@ -31,7 +31,7 @@ api.setProviderAndWait(new DynatraceProvider(System.getenv("DT_SDK_KEY")));
 
 Client client = api.getClient();
 EvaluationContext ctx = new ImmutableContext("user-123");
-boolean enabled = client.getBooleanValue("my-feature", false, ctx);
+boolean enabled = client.getBooleanValue("my-flag", false, ctx);
 
 // On shutdown:
 api.shutdown();
