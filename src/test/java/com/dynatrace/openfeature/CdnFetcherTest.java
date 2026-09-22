@@ -143,9 +143,8 @@ class CdnFetcherTest {
 
     @Test
     void ticksInsideTheRetryAfterWindowAreSkippedWithoutNetworkCall() throws IOException {
-        // KB 2.3: the 429 response itself ends the fetch and opens a rate-limit window;
-        // subsequent poll ticks inside that window are *skipped*: they make no request and,
-        // like any skipped tick, must not be reported as a success or a failure.
+        // KB 2.3: the 429 ends the fetch and opens a rate-limit window; ticks inside that
+        // window make no request, so they are skipped rather than reported as an outcome.
         server.enqueue(new MockResponse()
                 .setResponseCode(429)
                 .addHeader(CdnFetcher.HEADER_RETRY_AFTER, "60"));

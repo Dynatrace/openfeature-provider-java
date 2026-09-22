@@ -6,9 +6,8 @@ package com.dynatrace.openfeature;
  * <p>{@code body} is null on HTTP 304 (Not Modified); callers should skip updating
  * flagd-core in that case.
  *
- * <p>{@link #skipped()} is a distinct outcome from any HTTP status: it means no request was made
- * because a fetch was already in flight. A skipped fetch is neither a success nor a failure and
- * must not be reported as either; see {@link PollingManager} and KB section 2.1.1.
+ * <p>{@link #skipped()} is a distinct outcome from any HTTP status: no request was made, so it is
+ * neither a success nor a failure and must not be reported as either (KB section 2.1.1).
  */
 final class FetchResult {
 
@@ -29,7 +28,7 @@ final class FetchResult {
         this.lastModified = lastModified;
     }
 
-    /** No request was made: a fetch was already in flight (KB section 2.1.1). */
+    /** No request was made: a fetch was already in flight, or a Retry-After window is open. */
     static FetchResult skipped() {
         return SKIPPED;
     }
@@ -53,15 +52,11 @@ final class FetchResult {
         return lastModified;
     }
 
-    /**
-     * {@code Last-Modified} as Unix epoch seconds, for comparison against the {@code lastModified}
-     * carried by an SSE notification. Null if the header was absent or unparseable.
-     */
+    /** {@code Last-Modified} as Unix epoch seconds, to compare against an SSE {@code lastModified}. */
     Long getLastModifiedEpochSeconds() {
         return HttpDates.parseEpochSeconds(lastModified);
     }
 
-    /** True if no request was made because a fetch was already in flight. */
     boolean isSkipped() {
         return statusCode == STATUS_SKIPPED;
     }

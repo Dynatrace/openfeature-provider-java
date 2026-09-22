@@ -264,15 +264,11 @@ public final class DynatraceProvider extends EventProvider {
      *   <li>Emit {@code PROVIDER_READY} (via return)</li>
      * </ol>
      *
-     * <p>The initial fetch is bounded like every other fetch (spec §2.4): two attempts, so a
-     * failing initialization gives up after roughly 8s rather than retrying for half a minute.
-     *
-     * <p>A failed initial fetch still starts the polling timer before rethrowing, so the provider
-     * "recovers on the polling timer like any other failure" (spec §2.4). Without that, a single
-     * transient 5xx at startup would leave the provider in {@code ERROR} with nothing scheduled to
-     * retry, and only an application restart could recover it. When init failed there is no config
-     * to read an SSE URL from, so the provider runs polling-only at the disconnected cadence until
-     * a poll succeeds, at which point SSE is started from the config it returned.
+     * <p>A failed initial fetch still starts the polling timer before rethrowing, so it recovers
+     * like any other failure (spec §2.4); otherwise a transient 5xx at startup would strand the
+     * provider in {@code ERROR} with nothing scheduled to retry. There is no config to read an
+     * SSE URL from in that case, so it polls at the disconnected cadence until a poll succeeds
+     * and SSE starts from the config that poll returned.
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
@@ -323,9 +319,8 @@ public final class DynatraceProvider extends EventProvider {
                     pollIntervalDisconnected, e.getMessage());
         }
 
-        // Start polling at the disconnected cadence; SSE connect/disconnect adjust it via
-        // setInterval. Started only now, after the initial fetch has completed, so init never
-        // contends with the first tick (spec §2.1.1), and started on the failure path too.
+        // Started only now, after the initial fetch has completed, so init never contends with
+        // the first tick (spec §2.1.1). Reached on the failure path too.
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
@@ -349,9 +344,8 @@ public final class DynatraceProvider extends EventProvider {
 
     /**
      * Opens the SSE connection using the SSE URL carried in the CDN config, if one is present and
-     * SSE is enabled. Idempotent: a no-op once a connection exists, so the recovery path can call
-     * it on the first successful poll after a failed initialization without risking a second
-     * stream.
+     * SSE is enabled. Idempotent, so the post-failed-init recovery path can call it on the first
+     * successful poll without risking a second stream.
      */
     private synchronized void ensureSseStarted(String body) {
         if (!sseEnabled) {
@@ -504,9 +498,9 @@ public final class DynatraceProvider extends EventProvider {
      * than what we last applied (it returns 304). Duplicate, stale, or out-of-order pokes
      * therefore collapse to a cheap conditional GET.
      *
-     * <p>The announced {@code lastModified} is forwarded so that a re-fetch deferred behind an
-     * in-flight fetch (KB section 2.1.1) can be dropped when that fetch already returned a config
-     * at least as new. It is never used to drop the notification up front.
+     * <p>The announced {@code lastModified} is forwarded only so a re-fetch deferred behind an
+     * in-flight fetch can be dropped when that fetch already returned a config at least as new
+     * (KB section 2.1.1). It never drops the notification up front.
      */
     void onSseMessage(SseMessage msg) {
         if (msg == null) {
@@ -539,8 +533,7 @@ public final class DynatraceProvider extends EventProvider {
         try {
             List<String> changed = flagdCore.setFlagsAndGetChangedKeys(json);
             updateMetricsVersionFromFlagSet();
-            // If initialization failed there was no config to read an SSE URL from, so SSE was
-            // never opened. This is the first config we have seen, so open it now. No-op otherwise.
+            // Covers the failed-init case, where there was no config to read an SSE URL from.
             ensureSseStarted(json);
             return changed;
         } catch (FlagStoreException e) {

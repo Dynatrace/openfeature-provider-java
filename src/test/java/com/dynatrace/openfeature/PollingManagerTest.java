@@ -267,9 +267,8 @@ class PollingManagerTest {
     @Test
     @Timeout(10)
     void contendedPollTickIsSkippedAndEmitsNothing() throws InterruptedException {
-        // KB 2.1.1: a tick that finds a fetch in flight is skipped. It must not cancel the
-        // in-flight fetch, and must emit neither success nor failure; emitting success would
-        // reset the staleness grace timer on every tick of a CDN outage.
+        // KB 2.1.1: a contended tick must not cancel the in-flight fetch, and must emit
+        // neither success nor failure.
         AtomicBoolean firstWasInterrupted = new AtomicBoolean(false);
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
@@ -537,9 +536,8 @@ class PollingManagerTest {
     @Timeout(10)
     void coalescedSseRefetchRetainsTheGreatestAnnouncedLastModified() throws InterruptedException {
         // An out-of-order (older) notification arriving after a newer one must not replace it.
-        // If the pending slot kept the latest arrival rather than the greatest value, the
-        // completing fetch would look new enough and the pending re-fetch would be dropped,
-        // hiding the newer config until the next poll tick.
+        // If the slot kept the latest arrival rather than the greatest value, the completing
+        // fetch would look new enough and the re-fetch would be wrongly dropped.
         String completedAt = "Tue, 14 Nov 2023 22:13:20 GMT"; // == 1700000000
         assertEquals(1_700_000_000L, HttpDates.parseEpochSeconds(completedAt));
 

@@ -41,10 +41,9 @@ final class CdnFetcher {
     static final String HEADER_RETRY_AFTER = "Retry-After";
 
     /**
-     * Bounds a single attempt. Together with {@link RetryStrategy#MAX_ATTEMPTS} this keeps a whole
-     * fetch shorter than the shortest poll interval, so two polls can never be in flight at once
-     * (KB section 2.1). Changing it means re-checking that invariant; see
-     * {@code RetryBoundInvariantTest}.
+     * Bounds a single attempt. With {@link RetryStrategy#MAX_ATTEMPTS} this keeps a whole fetch
+     * shorter than the shortest poll interval (KB section 2.1); changing it means re-checking
+     * that invariant, which {@code RetryBoundInvariantTest} guards.
      */
     static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(4);
 
@@ -82,22 +81,16 @@ final class CdnFetcher {
     /**
      * Fetches the flag configuration from the CDN with retry.
      *
-     * <p>If currently rate-limited (429), returns a 429 {@link FetchResult} immediately
-     * without making a network request.
-     *
-     * <p>Uses {@code tryLock} to enforce single-flight fetching (KB section 2.1.1): at most one
-     * CDN fetch runs at a time across init, poll and SSE-triggered re-fetch. A contended caller
-     * returns {@link FetchResult#skipped()} rather than a 304: a skipped fetch learned nothing,
-     * so reporting it as a successful revalidation would reset the staleness grace timer and hold
-     * the provider in {@code READY} for the whole duration of a CDN outage.
+     * <p>Returns {@link FetchResult#skipped()} without making a request when a fetch is already
+     * in flight (KB section 2.1.1) or when inside an active Retry-After window (KB section 2.3).
+     * A skip must not be reported as a 304: it learned nothing, so treating it as a successful
+     * revalidation would reset the staleness grace timer and hold the provider in {@code READY}
+     * for the whole duration of a CDN outage.
      *
      * @return {@link FetchResult}; body is null on 304, 429, a skip, or on a stale-node response
      * @throws IOException on network failure after all retry attempts exhausted
      */
     FetchResult fetch() throws IOException {
-        // Inside an active Retry-After window this tick is suppressed, not attempted (KB 2.3:
-        // "skip poll ticks that fall inside it"). It made no request, so like any other skipped
-        // tick it must emit neither success nor failure.
         if (isRateLimited()) {
             log.debug("inside Retry-After window; skipping fetch (no request made)");
             return FetchResult.skipped();

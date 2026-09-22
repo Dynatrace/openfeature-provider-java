@@ -1088,9 +1088,8 @@ class DynatraceProviderTest {
 
     @Test
     void failedInitStillStartsPollingAndRecovers() throws Exception {
-        // KB 2.4: a failed initialization "transitions to ERROR and recovers on the polling timer
-        // like any other failure". Without a timer, one transient 5xx at startup would wedge the
-        // provider in ERROR until the application restarted.
+        // KB 2.4: a failed init recovers on the polling timer like any other failure. Without
+        // one, a transient 5xx at startup would wedge the provider in ERROR until restart.
         AtomicInteger requests = new AtomicInteger();
         server.setDispatcher(new Dispatcher() {
             @Override
@@ -1143,9 +1142,8 @@ class DynatraceProviderTest {
 
     @Test
     void skippedPollTicksDoNotResetTheGraceTimer() throws Exception {
-        // KB 2.1.1: a tick that finds a fetch in flight emits nothing. If it were reported as a
-        // success it would cancel the grace timer on every tick, holding the provider in READY
-        // for the whole duration of a CDN outage, the exact condition grace exists to surface.
+        // KB 2.1.1: a skipped tick emits nothing. Reported as a success it would cancel grace
+        // on every tick, holding the provider in READY for a whole CDN outage.
         //
         // Each failing response is delayed past the 50ms poll cadence, so most ticks contend.
         AtomicInteger requests = new AtomicInteger();

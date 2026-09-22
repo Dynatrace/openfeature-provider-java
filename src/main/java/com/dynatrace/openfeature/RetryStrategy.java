@@ -20,9 +20,9 @@ import java.util.concurrent.Callable;
  *   <li>Jitter: +0-20% additive random</li>
  * </ul>
  *
- * <p>One retry, not a loop. A fetch must not outlive the shortest poll interval (KB section 2.1),
- * so the attempt count is capped rather than escalating with backoff; beyond the single retry,
- * recovery is the next poll tick's job. See {@code RetryBoundInvariantTest}.
+ * <p>One retry, not a loop: a fetch must not outlive the shortest poll interval (KB section 2.1),
+ * so beyond the single retry recovery is the next poll tick's job. {@code RetryBoundInvariantTest}
+ * guards the arithmetic.
  */
 final class RetryStrategy {
 
@@ -32,7 +32,7 @@ final class RetryStrategy {
     static final long BASE_DELAY_MS = 100L;
     static final double MAX_JITTER_FACTOR = 0.20;
 
-    /** Worst-case time spent sleeping across a whole fetch; used by the fetch-duration invariant. */
+    /** Worst-case sleep across a whole fetch; an input to the fetch-duration invariant. */
     static final long MAX_TOTAL_BACKOFF_MS =
             (long) ((MAX_ATTEMPTS - 1) * BASE_DELAY_MS * (1 + MAX_JITTER_FACTOR));
 
