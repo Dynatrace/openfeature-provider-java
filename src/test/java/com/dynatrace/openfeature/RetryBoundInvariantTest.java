@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>Two polls must never be in flight at once. That is not a coincidence of the current numbers;
  * it is a property any change to the request timeout, the attempt count or the backoff has to
- * preserve. If this test fails, the change broke the bound — fix the numbers, don't relax the test.
+ * preserve. If this test fails, the change broke the bound; fix the numbers, don't relax the test.
  */
 class RetryBoundInvariantTest {
 

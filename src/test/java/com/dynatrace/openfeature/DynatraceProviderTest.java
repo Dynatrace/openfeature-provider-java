@@ -1072,7 +1072,7 @@ class DynatraceProviderTest {
 
     @Test
     void initialFetchGivesUpAfterTheBoundedAttemptCount() throws IOException {
-        // KB 2.4: the 2-attempt cap applies to the initial fetch too — a failing init gives up
+        // KB 2.4: the 2-attempt cap applies to the initial fetch too; a failing init gives up
         // in seconds rather than retrying for half a minute.
         for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
             server.enqueue(new MockResponse().setResponseCode(503));
@@ -1145,7 +1145,7 @@ class DynatraceProviderTest {
     void skippedPollTicksDoNotResetTheGraceTimer() throws Exception {
         // KB 2.1.1: a tick that finds a fetch in flight emits nothing. If it were reported as a
         // success it would cancel the grace timer on every tick, holding the provider in READY
-        // for the whole duration of a CDN outage — the exact condition grace exists to surface.
+        // for the whole duration of a CDN outage, the exact condition grace exists to surface.
         //
         // Each failing response is delayed past the 50ms poll cadence, so most ticks contend.
         AtomicInteger requests = new AtomicInteger();

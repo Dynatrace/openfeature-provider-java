@@ -43,7 +43,7 @@ final class CdnFetcher {
     /**
      * Bounds a single attempt. Together with {@link RetryStrategy#MAX_ATTEMPTS} this keeps a whole
      * fetch shorter than the shortest poll interval, so two polls can never be in flight at once
-     * (KB section 2.1). Changing it means re-checking that invariant — see
+     * (KB section 2.1). Changing it means re-checking that invariant; see
      * {@code RetryBoundInvariantTest}.
      */
     static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(4);
@@ -87,7 +87,7 @@ final class CdnFetcher {
      *
      * <p>Uses {@code tryLock} to enforce single-flight fetching (KB section 2.1.1): at most one
      * CDN fetch runs at a time across init, poll and SSE-triggered re-fetch. A contended caller
-     * returns {@link FetchResult#skipped()} rather than a 304 — a skipped fetch learned nothing,
+     * returns {@link FetchResult#skipped()} rather than a 304: a skipped fetch learned nothing,
      * so reporting it as a successful revalidation would reset the staleness grace timer and hold
      * the provider in {@code READY} for the whole duration of a CDN outage.
      *

@@ -259,7 +259,7 @@ public final class DynatraceProvider extends EventProvider {
      *   <li>Fetch flagd config JSON from CDN</li>
      *   <li>Load config into flagd-core</li>
      *   <li>Open SSE connection (async; errors handled by callbacks)</li>
-     *   <li>Start polling timer — only after step 1 has completed, so the initial fetch never
+     *   <li>Start polling timer, only once step 1 has completed, so the initial fetch never
      *       contends with the first tick (spec §2.1.1)</li>
      *   <li>Emit {@code PROVIDER_READY} (via return)</li>
      * </ol>
@@ -325,7 +325,7 @@ public final class DynatraceProvider extends EventProvider {
 
         // Start polling at the disconnected cadence; SSE connect/disconnect adjust it via
         // setInterval. Started only now, after the initial fetch has completed, so init never
-        // contends with the first tick (spec §2.1.1) — and started on the failure path too.
+        // contends with the first tick (spec §2.1.1), and started on the failure path too.
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
@@ -540,7 +540,7 @@ public final class DynatraceProvider extends EventProvider {
             List<String> changed = flagdCore.setFlagsAndGetChangedKeys(json);
             updateMetricsVersionFromFlagSet();
             // If initialization failed there was no config to read an SSE URL from, so SSE was
-            // never opened. This is the first config we have seen — open it now. No-op otherwise.
+            // never opened. This is the first config we have seen, so open it now. No-op otherwise.
             maybeStartSse(json);
             return changed;
         } catch (FlagStoreException e) {

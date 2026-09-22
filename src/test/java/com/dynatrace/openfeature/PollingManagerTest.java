@@ -268,7 +268,7 @@ class PollingManagerTest {
     @Timeout(10)
     void contendedPollTickIsSkippedAndEmitsNothing() throws InterruptedException {
         // KB 2.1.1: a tick that finds a fetch in flight is skipped. It must not cancel the
-        // in-flight fetch, and must emit neither success nor failure — emitting success would
+        // in-flight fetch, and must emit neither success nor failure; emitting success would
         // reset the staleness grace timer on every tick of a CDN outage.
         AtomicBoolean firstWasInterrupted = new AtomicBoolean(false);
         AtomicInteger successes = new AtomicInteger();
@@ -612,7 +612,7 @@ class PollingManagerTest {
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
         manager.triggerSseRefetch(1_700_000_000L); // droppable on its own
-        manager.triggerSseRefetch(null);           // unknown — must make the pending undroppable
+        manager.triggerSseRefetch(null);           // unknown, must make the pending undroppable
         release.countDown();
 
         Thread.sleep(500);

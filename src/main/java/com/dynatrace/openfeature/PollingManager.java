@@ -35,7 +35,7 @@ import java.util.function.Function;
  *       coalesced</b> into a single pending re-fetch, issued when the slot frees. It is dropped
  *       only if the fetch that just completed already returned a config at least as new as the
  *       SSE-announced {@code lastModified}. Dropping outright would hide a config change for up
- *       to a full poll interval — 10 minutes while SSE is connected.</li>
+ *       to a full poll interval, which is 10 minutes while SSE is connected.</li>
  * </ul>
  *
  * <p>The poll arithmetic (see {@link CdnFetcher#REQUEST_TIMEOUT} and
@@ -68,7 +68,7 @@ final class PollingManager {
 
     /**
      * {@code lastModified} announced by the deferred SSE notification, as Unix epoch seconds.
-     * Null means "unknown" — the pending re-fetch is then always issued, never dropped.
+     * Null means "unknown": the pending re-fetch is then always issued, never dropped.
      */
     private Long pendingSseLastModified;
 
@@ -184,7 +184,7 @@ final class PollingManager {
             return;
         }
         if (isFetchInFlight()) {
-            // Emits nothing — in particular, does not reset the grace timer (KB section 2.1.1).
+            // Emits nothing; in particular, it does not reset the grace timer (KB section 2.1.1).
             log.debug("poll tick skipped: a fetch is already in flight");
             return;
         }

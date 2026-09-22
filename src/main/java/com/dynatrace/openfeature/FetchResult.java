@@ -8,7 +8,7 @@ package com.dynatrace.openfeature;
  *
  * <p>{@link #skipped()} is a distinct outcome from any HTTP status: it means no request was made
  * because a fetch was already in flight. A skipped fetch is neither a success nor a failure and
- * must not be reported as either — see {@link PollingManager} and KB section 2.1.1.
+ * must not be reported as either; see {@link PollingManager} and KB section 2.1.1.
  */
 final class FetchResult {
 

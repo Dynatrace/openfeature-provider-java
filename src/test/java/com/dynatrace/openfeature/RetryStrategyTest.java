@@ -90,7 +90,7 @@ class RetryStrategyTest {
 
     @Test
     void capsAtTwoAttemptsWithOneBackoff() throws IOException {
-        // KB 2.4: one retry, not a loop — the fetch must stay short enough that it cannot
+        // KB 2.4: one retry, not a loop; the fetch must stay short enough that it cannot
         // outlive the shortest poll interval (KB 2.1).
         assertEquals(2, RetryStrategy.MAX_ATTEMPTS);
 
