@@ -314,7 +314,7 @@ public final class DynatraceProvider extends EventProvider {
             state.set(ProviderState.READY);
 
             // open SSE connection (spec §3.1 step 3)
-            maybeStartSse(body);
+            ensureSseStarted(body);
         } catch (RuntimeException e) {
             // Keep going: the polling timer below is what lets this recover (spec §2.4).
             initFailure = e;
@@ -353,7 +353,7 @@ public final class DynatraceProvider extends EventProvider {
      * it on the first successful poll after a failed initialization without risking a second
      * stream.
      */
-    private synchronized void maybeStartSse(String body) {
+    private synchronized void ensureSseStarted(String body) {
         if (!sseEnabled) {
             log.info("SSE disabled by configuration; running in polling-only mode");
             return;
@@ -541,7 +541,7 @@ public final class DynatraceProvider extends EventProvider {
             updateMetricsVersionFromFlagSet();
             // If initialization failed there was no config to read an SSE URL from, so SSE was
             // never opened. This is the first config we have seen, so open it now. No-op otherwise.
-            maybeStartSse(json);
+            ensureSseStarted(json);
             return changed;
         } catch (FlagStoreException e) {
             throw new RuntimeException("failed to store flag configuration: " + e.getMessage(), e);
