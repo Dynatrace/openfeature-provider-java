@@ -259,68 +259,73 @@ public final class DynatraceProvider extends EventProvider {
      *   <li>Fetch flagd config JSON from CDN</li>
      *   <li>Load config into flagd-core</li>
      *   <li>Open SSE connection (async; errors handled by callbacks)</li>
-     *   <li>Start polling timer</li>
+     *   <li>Start polling timer — only after step 1 has completed, so the initial fetch never
+     *       contends with the first tick (spec §2.1.1)</li>
      *   <li>Emit {@code PROVIDER_READY} (via return)</li>
      * </ol>
+     *
+     * <p>The initial fetch is bounded like every other fetch (spec §2.4): two attempts, so a
+     * failing initialization gives up after roughly 8s rather than retrying for half a minute.
+     *
+     * <p>A failed initial fetch still starts the polling timer before rethrowing, so the provider
+     * "recovers on the polling timer like any other failure" (spec §2.4). Without that, a single
+     * transient 5xx at startup would leave the provider in {@code ERROR} with nothing scheduled to
+     * retry, and only an application restart could recover it. When init failed there is no config
+     * to read an SSE URL from, so the provider runs polling-only at the disconnected cadence until
+     * a poll succeeds, at which point SSE is started from the config it returned.
      */
     @Override
     public void initialize(EvaluationContext evaluationContext) throws Exception {
         String host = URI.create(cdnUrl).getHost();
         log.info("initializing Dynatrace feature flag provider (host={})", host);
 
-        FetchResult result;
-        try {
-            result = fetcher.fetch();
-        } catch (IOException e) {
-            throw new RuntimeException("initial CDN fetch failed: " + e.getMessage(), e);
-        }
-
-        if (!result.isSuccess()) {
-            throw new RuntimeException("initial CDN fetch returned HTTP " + result.getStatusCode());
-        }
-
-        String body = result.getBody();
-        if (body == null || body.isBlank()) {
-            throw new RuntimeException("initial CDN response body was empty");
-        }
-
-        try {
-            flagdCore.setFlags(body);
-            updateMetricsVersionFromFlagSet();
-        } catch (FlagStoreException e) {
-            throw new RuntimeException("initial CDN config is invalid: " + e.getMessage(), e);
-        }
-
-        state.set(ProviderState.READY);
-
-        // start grace timer scheduler (lazy; thread only created when needed)
+        // Created before the fetch: the failure path needs it for the grace timer.
         graceScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "dt-provider-grace-timer");
             t.setDaemon(true);
             return t;
         });
 
-        // open SSE connection (spec §3.1 step 3)
-        if (sseEnabled) {
-            URI cdnUri = URI.create(cdnUrl);
-            String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
-            String sseUrl = extractSseUrl(body, cdnOrigin);
-            if (sseUrl != null) {
-                SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
-                try {
-                    sm.start();
-                    sseManager = sm;
-                } catch (Exception e) {
-                    log.warn("failed to start SSE connection; falling back to polling-only mode: {}", e.getMessage());
-                }
-            } else {
-                log.info("no SSE URL in CDN config; running in polling-only mode");
+        RuntimeException initFailure = null;
+        try {
+            FetchResult result;
+            try {
+                result = fetcher.fetch();
+            } catch (IOException e) {
+                throw new RuntimeException("initial CDN fetch failed: " + e.getMessage(), e);
             }
-        } else {
-            log.info("SSE disabled by configuration; running in polling-only mode");
+
+            if (!result.isSuccess()) {
+                throw new RuntimeException("initial CDN fetch returned HTTP " + result.getStatusCode());
+            }
+
+            String body = result.getBody();
+            if (body == null || body.isBlank()) {
+                throw new RuntimeException("initial CDN response body was empty");
+            }
+
+            try {
+                flagdCore.setFlags(body);
+                updateMetricsVersionFromFlagSet();
+            } catch (FlagStoreException e) {
+                throw new RuntimeException("initial CDN config is invalid: " + e.getMessage(), e);
+            }
+
+            state.set(ProviderState.READY);
+
+            // open SSE connection (spec §3.1 step 3)
+            maybeStartSse(body);
+        } catch (RuntimeException e) {
+            // Keep going: the polling timer below is what lets this recover (spec §2.4).
+            initFailure = e;
+            state.set(ProviderState.ERROR);
+            log.error("initialization failed; starting polling-only recovery at {}: {}",
+                    pollIntervalDisconnected, e.getMessage());
         }
 
-        // Start polling at the disconnected cadence; SSE connect/disconnect adjust it via setInterval.
+        // Start polling at the disconnected cadence; SSE connect/disconnect adjust it via
+        // setInterval. Started only now, after the initial fetch has completed, so init never
+        // contends with the first tick (spec §2.1.1) — and started on the failure path too.
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
@@ -335,7 +340,41 @@ public final class DynatraceProvider extends EventProvider {
         }
 
         metricsFlusher.start();
+
+        if (initFailure != null) {
+            throw initFailure;
+        }
         log.info("Dynatrace provider initialized successfully");
+    }
+
+    /**
+     * Opens the SSE connection using the SSE URL carried in the CDN config, if one is present and
+     * SSE is enabled. Idempotent: a no-op once a connection exists, so the recovery path can call
+     * it on the first successful poll after a failed initialization without risking a second
+     * stream.
+     */
+    private synchronized void maybeStartSse(String body) {
+        if (!sseEnabled) {
+            log.info("SSE disabled by configuration; running in polling-only mode");
+            return;
+        }
+        if (sseManager != null || shutdown.get()) {
+            return;
+        }
+        URI cdnUri = URI.create(cdnUrl);
+        String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
+        String sseUrl = extractSseUrl(body, cdnOrigin);
+        if (sseUrl == null) {
+            log.info("no SSE URL in CDN config; running in polling-only mode");
+            return;
+        }
+        SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
+        try {
+            sm.start();
+            sseManager = sm;
+        } catch (Exception e) {
+            log.warn("failed to start SSE connection; falling back to polling-only mode: {}", e.getMessage());
+        }
     }
 
     /**
@@ -389,7 +428,8 @@ public final class DynatraceProvider extends EventProvider {
             log.info("SSE connected; poll interval switched to {}", pollIntervalConnected);
         }
         if (pm != null && (!wasConnected || hadPendingDisconnect)) {
-            pm.triggerImmediateFetch();
+            // Reconnect catch-up: no announced lastModified, so this re-fetch is never dropped.
+            pm.triggerSseRefetch(null);
         }
     }
 
@@ -456,14 +496,17 @@ public final class DynatraceProvider extends EventProvider {
      * Handles a parsed SSE message per the SSE message format spec:
      * <ul>
      *   <li>Ignores any type other than {@code refetchConfig} (this is a server-side provider).</li>
-     *   <li>Otherwise triggers an immediate conditional GET against the CDN URL.</li>
+     *   <li>Otherwise triggers a conditional GET against the CDN URL.</li>
      * </ul>
      *
      * <p>The message is only a "something changed" signal — the fetch always pulls CDN-current
      * config, and {@link CdnFetcher} rejects any response whose {@code Last-Modified} isn't newer
-     * than what we last applied (it returns 304). So there's no need to track or compare
-     * {@code lastModified} here: duplicate, stale, or out-of-order pokes simply collapse to a cheap
-     * conditional GET, and the {@code CdnFetcher} guard remains the single source of ordering truth.
+     * than what we last applied (it returns 304). Duplicate, stale, or out-of-order pokes
+     * therefore collapse to a cheap conditional GET.
+     *
+     * <p>The announced {@code lastModified} is forwarded so that a re-fetch deferred behind an
+     * in-flight fetch (KB section 2.1.1) can be dropped when that fetch already returned a config
+     * at least as new. It is never used to drop the notification up front.
      */
     void onSseMessage(SseMessage msg) {
         if (msg == null) {
@@ -474,11 +517,11 @@ public final class DynatraceProvider extends EventProvider {
                     msg.type, SseMessage.TYPE_REFETCH_CONFIG);
             return;
         }
-        log.debug("SSE refetchConfig received; triggering immediate CDN re-fetch (lastModified={})",
+        log.debug("SSE refetchConfig received; triggering CDN re-fetch (lastModified={})",
                 msg.lastModified);
         PollingManager pm = pollingManager;
         if (pm != null) {
-            pm.triggerImmediateFetch();
+            pm.triggerSseRefetch(msg.lastModified);
         }
     }
 
@@ -496,6 +539,9 @@ public final class DynatraceProvider extends EventProvider {
         try {
             List<String> changed = flagdCore.setFlagsAndGetChangedKeys(json);
             updateMetricsVersionFromFlagSet();
+            // If initialization failed there was no config to read an SSE URL from, so SSE was
+            // never opened. This is the first config we have seen — open it now. No-op otherwise.
+            maybeStartSse(json);
             return changed;
         } catch (FlagStoreException e) {
             throw new RuntimeException("failed to store flag configuration: " + e.getMessage(), e);

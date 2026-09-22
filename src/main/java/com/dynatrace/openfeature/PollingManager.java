@@ -22,15 +22,29 @@ import java.util.function.Function;
  *
  * <p>A ticker fires every {@code interval} — anchored to start, not to how long a poll takes, so
  * retry/backoff inside a poll never stretches the cadence — and hands the actual work to a single
- * worker thread. The ticker never blocks: if a previous poll is still running when the next tick
- * fires, that poll is cancelled and a fresh one started.
+ * worker thread. The ticker never blocks.
+ *
+ * <p><b>Single-flight (KB section 2.1.1).</b> At most one fetch runs at a time, and a contended
+ * trigger is never cancelled-and-restarted:
+ * <ul>
+ *   <li>A <b>poll tick</b> that finds a fetch in flight is <b>skipped</b>. It emits neither
+ *       success nor failure, so it does not reset the staleness grace timer. Reporting it as a
+ *       success would hold the provider in {@code READY} for the whole duration of a CDN outage,
+ *       hiding exactly the condition the grace period exists to surface.</li>
+ *   <li>An <b>SSE-triggered re-fetch</b> that finds a fetch in flight is <b>deferred and
+ *       coalesced</b> into a single pending re-fetch, issued when the slot frees. It is dropped
+ *       only if the fetch that just completed already returned a config at least as new as the
+ *       SSE-announced {@code lastModified}. Dropping outright would hide a config change for up
+ *       to a full poll interval — 10 minutes while SSE is connected.</li>
+ * </ul>
+ *
+ * <p>The poll arithmetic (see {@link CdnFetcher#REQUEST_TIMEOUT} and
+ * {@link RetryStrategy#MAX_ATTEMPTS}) already rules out poll-versus-poll overlap; the skip path
+ * covers init and SSE contention.
  *
  * <p>The interval is event-driven via {@link #setInterval(Duration)}: the provider switches between
  * the SSE-connected safety-net cadence and the faster SSE-disconnected cadence on SSE
  * connect/disconnect, rather than re-evaluating an interval every cycle.
- *
- * <p>Call {@link #triggerImmediateFetch()} to request an out-of-band poll (e.g. on an SSE
- * notification, or right after an SSE disconnect) without disturbing the ticker cadence.
  */
 final class PollingManager {
 
@@ -46,8 +60,17 @@ final class PollingManager {
 
     private ScheduledExecutorService ticker;
     private ExecutorService worker;
-    private volatile ScheduledFuture<?> tickerFuture;
-    private volatile Future<?> pollInFlight;
+    private ScheduledFuture<?> tickerFuture;
+    private Future<?> fetchInFlight;
+
+    /** True while an SSE-triggered re-fetch is waiting for the in-flight fetch to finish. */
+    private boolean pendingSseRefetch;
+
+    /**
+     * {@code lastModified} announced by the deferred SSE notification, as Unix epoch seconds.
+     * Null means "unknown" — the pending re-fetch is then always issued, never dropped.
+     */
+    private Long pendingSseLastModified;
 
     /**
      * @param fetchFlags      called to fetch flag configuration JSON from the CDN
@@ -73,8 +96,9 @@ final class PollingManager {
     }
 
     /**
-     * Starts polling. Must be called after the initial fetch/store succeeds.
-     * The first poll fires one interval after start.
+     * Starts polling. Must be called after the initial fetch/store completes (KB section 3.1
+     * step 4), so initialization never contends with the first tick. The first poll fires one
+     * interval after start.
      */
     synchronized void start() {
         ticker = Executors.newSingleThreadScheduledExecutor(namedDaemon("dt-provider-poll-ticker"));
@@ -95,16 +119,40 @@ final class PollingManager {
     }
 
     /**
-     * Cancels any in-flight poll and runs one immediately on the worker. Safe to call from any
-     * thread; does not disturb the ticker cadence. The {@link CdnFetcher}'s {@code tryLock} drops
-     * overlapping fetches, so a redundant trigger costs at most one conditional GET.
+     * Requests an out-of-band fetch on behalf of SSE (a {@code refetchConfig} notification, or a
+     * reconnect catch-up). Runs immediately if the fetch slot is free; otherwise it is deferred
+     * and coalesced into a single pending re-fetch. Safe to call from any thread; does not disturb
+     * the ticker cadence.
+     *
+     * @param announcedLastModified {@code lastModified} from the SSE message as Unix epoch
+     *                              seconds, or null when unknown (a reconnect catch-up). A
+     *                              deferred re-fetch is dropped only when the completed fetch
+     *                              already returned a config at least this new.
      */
-    void triggerImmediateFetch() {
-        runPoll();
+    synchronized void triggerSseRefetch(Long announcedLastModified) {
+        if (worker == null || worker.isShutdown()) {
+            return;
+        }
+        if (isFetchInFlight()) {
+            if (pendingSseRefetch) {
+                // coalesce: a null (unknown) announcement wins, since it can never be dropped
+                pendingSseLastModified = (pendingSseLastModified == null || announcedLastModified == null)
+                        ? null
+                        : Math.max(pendingSseLastModified, announcedLastModified);
+            } else {
+                pendingSseRefetch = true;
+                pendingSseLastModified = announcedLastModified;
+            }
+            log.debug("fetch in flight; deferring SSE re-fetch (lastModified={})", pendingSseLastModified);
+            return;
+        }
+        submit();
     }
 
-    /** Stops polling and shuts down the ticker and worker, interrupting any in-flight poll. */
+    /** Stops polling and shuts down the ticker and worker, interrupting any in-flight fetch. */
     synchronized void stop() {
+        pendingSseRefetch = false;
+        pendingSseLastModified = null;
         if (ticker != null) {
             ticker.shutdownNow();
         }
@@ -124,62 +172,105 @@ final class PollingManager {
         long periodMs = interval.toMillis();
         // Fixed-rate: ticks are anchored to start and never drift with poll duration. The tick body
         // only hands work to the worker, so the ticker thread itself never blocks.
-        tickerFuture = ticker.scheduleAtFixedRate(this::runPoll, periodMs, periodMs, TimeUnit.MILLISECONDS);
+        tickerFuture = ticker.scheduleAtFixedRate(this::onTick, periodMs, periodMs, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * Submits a poll to the worker, cancelling any still-running poll first so a slow or hung poll
-     * (one that overran the cadence) is abandoned rather than allowed to delay the next tick.
+     * Poll tick. Skipped outright if a fetch is already in flight: the in-flight fetch already does
+     * what this tick wanted, and the tick learned nothing, so it must not be reported as an outcome.
      */
-    private synchronized void runPoll() {
+    private synchronized void onTick() {
         if (worker == null || worker.isShutdown()) {
             return;
         }
-        Future<?> previous = pollInFlight;
-        if (previous != null && !previous.isDone()) {
-            log.debug("previous poll still running; cancelling and starting fresh");
-            previous.cancel(true);
+        if (isFetchInFlight()) {
+            // Emits nothing — in particular, does not reset the grace timer (KB section 2.1.1).
+            log.debug("poll tick skipped: a fetch is already in flight");
+            return;
         }
+        submit();
+    }
+
+    private boolean isFetchInFlight() {
+        Future<?> current = fetchInFlight;
+        return current != null && !current.isDone();
+    }
+
+    /** Caller must hold the monitor. */
+    private void submit() {
         try {
-            pollInFlight = worker.submit(this::poll);
+            fetchInFlight = worker.submit(this::runFetch);
         } catch (RejectedExecutionException e) {
             // worker shut down between the guard and submit; ignore
         }
     }
 
-    private void poll() {
+    private void runFetch() {
+        FetchResult result = null;
+        try {
+            result = poll();
+        } finally {
+            issuePendingSseRefetch(result);
+        }
+    }
+
+    /**
+     * Issues the deferred SSE re-fetch, if any, now that the slot is free. Runs on the worker
+     * thread, so the re-fetch it submits queues behind the current task rather than overlapping it.
+     *
+     * @param completed the result of the fetch that just finished, or null if it threw
+     */
+    private synchronized void issuePendingSseRefetch(FetchResult completed) {
+        if (!pendingSseRefetch || worker == null || worker.isShutdown()) {
+            return;
+        }
+        Long announced = pendingSseLastModified;
+        Long observed = completed == null ? null : completed.getLastModifiedEpochSeconds();
+        if (announced != null && observed != null && observed >= announced) {
+            log.debug("dropping deferred SSE re-fetch: completed fetch already returned "
+                    + "Last-Modified {} >= announced {}", observed, announced);
+            pendingSseRefetch = false;
+            pendingSseLastModified = null;
+            return;
+        }
+        log.debug("issuing deferred SSE re-fetch (announced lastModified={})", announced);
+        pendingSseRefetch = false;
+        pendingSseLastModified = null;
+        submit();
+    }
+
+    private FetchResult poll() {
         try {
             FetchResult result = fetchFlags.call();
 
-            // cancel(true) may arrive after fetchFlags returns but before we apply the result;
-            // discard rather than emit stale events into the provider state machine.
-            // Thread.interrupted() clears the flag so the next poll on this reused thread is unaffected.
-            if (Thread.interrupted()) {
-                log.debug("poll cancelled after fetch returned; discarding result");
-                return;
+            // No request was made because another fetch held the slot. Neither success nor
+            // failure: emit nothing, and in particular do not reset the grace timer.
+            if (result.isSkipped()) {
+                log.debug("fetch skipped: already in progress");
+                return result;
             }
 
             if (result.isNotModified()) {
                 log.debug("flags not modified");
                 emitSuccess.run();
-                return;
+                return result;
             }
 
             // 429: rate limited; still serving cached values (spec §2.3)
             if (result.isRateLimited()) {
                 log.debug("rate limited; serving cached values");
-                return;
+                return result;
             }
 
             if (!result.isSuccess()) {
                 emitFailure.accept("HTTP " + result.getStatusCode());
-                return;
+                return result;
             }
 
             String body = result.getBody();
             if (body == null || body.isEmpty()) {
                 emitFailure.accept("empty response body");
-                return;
+                return result;
             }
 
             List<String> changedKeys = storeFlags.apply(body);
@@ -189,13 +280,17 @@ final class PollingManager {
                 log.info("flag configuration changed: {}", changedKeys);
                 emitChange.accept(changedKeys);
             }
+            return result;
         } catch (Exception e) {
+            // Only shutdown interrupts this thread now that contended ticks are skipped rather
+            // than cancelled; treat an interrupt as "stopping", not as a poll failure.
             if (isInterrupted(e)) {
-                log.debug("poll cancelled");
-                return;
+                log.debug("poll interrupted (shutting down)");
+                return null;
             }
             log.warn("poll failed", e);
             emitFailure.accept(e.getMessage());
+            return null;
         }
     }
 

@@ -1061,4 +1061,141 @@ class DynatraceProviderTest {
         assertNull(SseMessage.parse("not-json"));
         assertNull(SseMessage.parse("{\"lastModified\":1}"));
     }
+
+    /** provider whose recovery polling is slow enough not to race assertions about init. */
+    private DynatraceProvider slowPollProvider() {
+        CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
+        return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
+                Duration.ofSeconds(30), Duration.ofSeconds(30),
+                Duration.ofMillis(200), TEST_SSE_DEBOUNCE);
+    }
+
+    @Test
+    void initialFetchGivesUpAfterTheBoundedAttemptCount() throws IOException {
+        // KB 2.4: the 2-attempt cap applies to the initial fetch too — a failing init gives up
+        // in seconds rather than retrying for half a minute.
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        DynatraceProvider p = slowPollProvider();
+
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
+        assertEquals(RetryStrategy.MAX_ATTEMPTS, server.getRequestCount(),
+                "initial fetch should make exactly " + RetryStrategy.MAX_ATTEMPTS + " attempts");
+        p.shutdown();
+    }
+
+    @Test
+    void failedInitStillStartsPollingAndRecovers() throws Exception {
+        // KB 2.4: a failed initialization "transitions to ERROR and recovers on the polling timer
+        // like any other failure". Without a timer, one transient 5xx at startup would wedge the
+        // provider in ERROR until the application restarted.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                // fail the whole initial fetch (both attempts), then serve a good config
+                if (requests.getAndIncrement() < RetryStrategy.MAX_ATTEMPTS) {
+                    return new MockResponse().setResponseCode(503);
+                }
+                return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()),
+                "a failed initial fetch should still surface to the caller");
+        assertEquals(ProviderState.ERROR, p.getState());
+
+        awaitState(p, ProviderState.READY, 5_000);
+        p.shutdown();
+    }
+
+    @Test
+    void failedInitStartsSseOnceTheFirstPollSucceeds() throws Exception {
+        // Init failure means no config, so no SSE URL. The provider must not stay polling-only
+        // forever: the first successful poll carries the config that names the SSE endpoint.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (request.getPath() != null && request.getPath().contains("/sse")) {
+                    return new MockResponse()
+                            .setResponseCode(200)
+                            .addHeader("Content-Type", "text/event-stream")
+                            .setBody(": connected\n\n");
+                }
+                if (requests.getAndIncrement() < RetryStrategy.MAX_ATTEMPTS) {
+                    return new MockResponse().setResponseCode(503);
+                }
+                return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
+
+        awaitState(p, ProviderState.READY, 5_000);
+        p.shutdown();
+    }
+
+    @Test
+    void skippedPollTicksDoNotResetTheGraceTimer() throws Exception {
+        // KB 2.1.1: a tick that finds a fetch in flight emits nothing. If it were reported as a
+        // success it would cancel the grace timer on every tick, holding the provider in READY
+        // for the whole duration of a CDN outage — the exact condition grace exists to surface.
+        //
+        // Each failing response is delayed past the 50ms poll cadence, so most ticks contend.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (requests.getAndIncrement() == 0) {
+                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                }
+                return new MockResponse()
+                        .setResponseCode(503)
+                        .setHeadersDelay(120, TimeUnit.MILLISECONDS);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofMillis(200));
+        p.initialize(new ImmutableContext());
+
+        // SSE never connects, so the first real failure goes STALE and starts the grace timer;
+        // the skipped ticks in between must not keep cancelling it.
+        awaitState(p, ProviderState.ERROR, 5_000);
+        p.shutdown();
+    }
+
+    @Test
+    void contendedTicksDoNotPileUpRequests() throws Exception {
+        // Single-flight: with responses slower than the cadence, the request count must track
+        // fetch duration, not tick count.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (requests.getAndIncrement() == 0) {
+                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                }
+                return new MockResponse()
+                        .setResponseCode(304)
+                        .setHeadersDelay(150, TimeUnit.MILLISECONDS);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+
+        Thread.sleep(600);
+        p.shutdown();
+
+        // ~12 ticks fit in 600ms at a 50ms cadence; at 150ms per fetch only ~4 can actually run.
+        int actual = requests.get();
+        assertTrue(actual <= 7,
+                "expected contended ticks to be skipped, but " + actual + " requests were made");
+    }
 }
