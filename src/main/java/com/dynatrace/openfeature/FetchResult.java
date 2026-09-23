@@ -52,11 +52,6 @@ final class FetchResult {
         return lastModified;
     }
 
-    /** {@code Last-Modified} as Unix epoch seconds, to compare against an SSE {@code lastModified}. */
-    Long getLastModifiedEpochSeconds() {
-        return HttpDates.parseEpochSeconds(lastModified);
-    }
-
     boolean isSkipped() {
         return statusCode == STATUS_SKIPPED;
     }

@@ -44,6 +44,9 @@ final class PollingManager {
 
     private static final Logger log = LoggerFactory.getLogger(PollingManager.class);
 
+    /** Stands in for an SSE announcement that carried no {@code lastModified}. */
+    private static final long LAST_MODIFIED_UNKNOWN = Long.MAX_VALUE;
+
     private final Callable<FetchResult> fetchFlags;
     private final Function<String, List<String>> storeFlags;
     private final Consumer<List<String>> emitChange;
@@ -57,11 +60,12 @@ final class PollingManager {
     private ScheduledFuture<?> tickerFuture;
     private Future<?> fetchInFlight;
 
-    /** True while an SSE-triggered re-fetch is waiting for the in-flight fetch to finish. */
-    private boolean pendingSseRefetch;
-
-    /** Announced epoch seconds for the deferred re-fetch; null means unknown, so never dropped. */
-    private Long pendingSseLastModified;
+    /**
+     * Announced epoch seconds of a deferred SSE re-fetch, or null when none is pending.
+     * {@link #LAST_MODIFIED_UNKNOWN} means the announcement carried no {@code lastModified}, so
+     * the re-fetch can never be dropped.
+     */
+    private Long pendingSseRefetchAt;
 
     /**
      * @param fetchFlags      called to fetch flag configuration JSON from the CDN
@@ -122,16 +126,11 @@ final class PollingManager {
             return;
         }
         if (isFetchInFlight()) {
-            if (pendingSseRefetch) {
-                // coalesce: a null (unknown) announcement wins, since it can never be dropped
-                pendingSseLastModified = (pendingSseLastModified == null || announcedLastModified == null)
-                        ? null
-                        : Math.max(pendingSseLastModified, announcedLastModified);
-            } else {
-                pendingSseRefetch = true;
-                pendingSseLastModified = announcedLastModified;
-            }
-            log.debug("fetch in flight; deferring SSE re-fetch (lastModified={})", pendingSseLastModified);
+            // Coalesce onto the greatest announcement; unknown wins, since it can never be dropped.
+            long announced = announcedLastModified == null ? LAST_MODIFIED_UNKNOWN : announcedLastModified;
+            pendingSseRefetchAt =
+                    pendingSseRefetchAt == null ? announced : Math.max(pendingSseRefetchAt, announced);
+            log.debug("fetch in flight; deferring SSE re-fetch (lastModified={})", announcedLastModified);
             return;
         }
         submit();
@@ -139,8 +138,7 @@ final class PollingManager {
 
     /** Stops polling and shuts down the ticker and worker, interrupting any in-flight fetch. */
     synchronized void stop() {
-        pendingSseRefetch = false;
-        pendingSseLastModified = null;
+        pendingSseRefetchAt = null;
         if (ticker != null) {
             ticker.shutdownNow();
         }
@@ -193,7 +191,17 @@ final class PollingManager {
     private void runFetch() {
         FetchResult result = null;
         try {
-            result = poll();
+            result = fetchFlags.call();
+            handleResult(result);
+        } catch (Exception e) {
+            // Only shutdown interrupts this thread now that contended ticks are skipped rather
+            // than cancelled, so an interrupt means "stopping", not a poll failure.
+            if (isInterrupted(e)) {
+                log.debug("poll interrupted (shutting down)");
+            } else {
+                log.warn("poll failed", e);
+                emitFailure.accept(e.getMessage());
+            }
         } finally {
             issuePendingSseRefetch(result);
         }
@@ -206,75 +214,58 @@ final class PollingManager {
      * @param completed result of the fetch that just finished, or null if it threw
      */
     private synchronized void issuePendingSseRefetch(FetchResult completed) {
-        if (!pendingSseRefetch || worker == null || worker.isShutdown()) {
+        if (pendingSseRefetchAt == null || worker == null || worker.isShutdown()) {
             return;
         }
-        Long announced = pendingSseLastModified;
-        Long observed = completed == null ? null : completed.getLastModifiedEpochSeconds();
-        if (announced != null && observed != null && observed >= announced) {
+        long announced = pendingSseRefetchAt;
+        pendingSseRefetchAt = null;
+
+        Long observed = completed == null ? null : HttpDates.parseEpochSeconds(completed.getLastModified());
+        if (announced != LAST_MODIFIED_UNKNOWN && observed != null && observed >= announced) {
             log.debug("dropping deferred SSE re-fetch: completed fetch already returned "
                     + "Last-Modified {} >= announced {}", observed, announced);
-            pendingSseRefetch = false;
-            pendingSseLastModified = null;
             return;
         }
-        log.debug("issuing deferred SSE re-fetch (announced lastModified={})", announced);
-        pendingSseRefetch = false;
-        pendingSseLastModified = null;
+        log.debug("issuing deferred SSE re-fetch");
         submit();
     }
 
-    private FetchResult poll() {
-        try {
-            FetchResult result = fetchFlags.call();
+    private void handleResult(FetchResult result) {
+        // No request made, so neither success nor failure: emit nothing and leave grace alone.
+        if (result.isSkipped()) {
+            log.debug("fetch skipped: no request was made");
+            return;
+        }
 
-            // No request made, so neither success nor failure: emit nothing and leave grace alone.
-            if (result.isSkipped()) {
-                log.debug("fetch skipped: already in progress");
-                return result;
-            }
-
-            if (result.isNotModified()) {
-                log.debug("flags not modified");
-                emitSuccess.run();
-                return result;
-            }
-
-            // 429: rate limited; still serving cached values (spec §2.3)
-            if (result.isRateLimited()) {
-                log.debug("rate limited; serving cached values");
-                return result;
-            }
-
-            if (!result.isSuccess()) {
-                emitFailure.accept("HTTP " + result.getStatusCode());
-                return result;
-            }
-
-            String body = result.getBody();
-            if (body == null || body.isEmpty()) {
-                emitFailure.accept("empty response body");
-                return result;
-            }
-
-            List<String> changedKeys = storeFlags.apply(body);
+        if (result.isNotModified()) {
+            log.debug("flags not modified");
             emitSuccess.run();
+            return;
+        }
 
-            if (changedKeys != null && !changedKeys.isEmpty()) {
-                log.info("flag configuration changed: {}", changedKeys);
-                emitChange.accept(changedKeys);
-            }
-            return result;
-        } catch (Exception e) {
-            // Only shutdown interrupts this thread now that contended ticks are skipped rather
-            // than cancelled, so an interrupt means "stopping", not a poll failure.
-            if (isInterrupted(e)) {
-                log.debug("poll interrupted (shutting down)");
-                return null;
-            }
-            log.warn("poll failed", e);
-            emitFailure.accept(e.getMessage());
-            return null;
+        // 429: rate limited; still serving cached values (spec §2.3)
+        if (result.isRateLimited()) {
+            log.debug("rate limited; serving cached values");
+            return;
+        }
+
+        if (!result.isSuccess()) {
+            emitFailure.accept("HTTP " + result.getStatusCode());
+            return;
+        }
+
+        String body = result.getBody();
+        if (body == null || body.isEmpty()) {
+            emitFailure.accept("empty response body");
+            return;
+        }
+
+        List<String> changedKeys = storeFlags.apply(body);
+        emitSuccess.run();
+
+        if (changedKeys != null && !changedKeys.isEmpty()) {
+            log.info("flag configuration changed: {}", changedKeys);
+            emitChange.accept(changedKeys);
         }
     }
 

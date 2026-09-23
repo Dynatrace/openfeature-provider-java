@@ -77,9 +77,13 @@ class DynatraceProviderTest {
     }
 
     private DynatraceProvider fastProvider(Duration gracePeriod) {
+        return provider(Duration.ofMillis(50), gracePeriod);
+    }
+
+    private DynatraceProvider provider(Duration pollInterval, Duration gracePeriod) {
         CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
         return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
-                Duration.ofMillis(50), gracePeriod, TEST_SSE_DEBOUNCE);
+                pollInterval, gracePeriod, TEST_SSE_DEBOUNCE);
     }
 
     /** Polls {@code provider.getState()} until it equals {@code expected} or the timeout elapses. */
@@ -1063,13 +1067,6 @@ class DynatraceProviderTest {
     }
 
     /** provider whose recovery polling is slow enough not to race assertions about init. */
-    private DynatraceProvider slowPollProvider() {
-        CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
-        return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
-                Duration.ofSeconds(30), Duration.ofSeconds(30),
-                Duration.ofMillis(200), TEST_SSE_DEBOUNCE);
-    }
-
     @Test
     void initialFetchGivesUpAfterTheBoundedAttemptCount() throws IOException {
         // KB 2.4: the 2-attempt cap applies to the initial fetch too; a failing init gives up
@@ -1078,7 +1075,7 @@ class DynatraceProviderTest {
             server.enqueue(new MockResponse().setResponseCode(503));
         }
 
-        DynatraceProvider p = slowPollProvider();
+        DynatraceProvider p = provider(Duration.ofSeconds(30), Duration.ofMillis(200));
 
         assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
         assertEquals(RetryStrategy.MAX_ATTEMPTS, server.getRequestCount(),

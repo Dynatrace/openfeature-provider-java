@@ -274,6 +274,9 @@ public final class DynatraceProvider extends EventProvider {
     public void initialize(EvaluationContext evaluationContext) throws Exception {
         String host = URI.create(cdnUrl).getHost();
         log.info("initializing Dynatrace feature flag provider (host={})", host);
+        if (!sseEnabled) {
+            log.info("SSE disabled by configuration; running in polling-only mode");
+        }
 
         // Created before the fetch: the failure path needs it for the grace timer.
         graceScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -291,6 +294,9 @@ public final class DynatraceProvider extends EventProvider {
                 throw new RuntimeException("initial CDN fetch failed: " + e.getMessage(), e);
             }
 
+            if (result.isSkipped()) {
+                throw new RuntimeException("initial CDN fetch was skipped; no request was made");
+            }
             if (!result.isSuccess()) {
                 throw new RuntimeException("initial CDN fetch returned HTTP " + result.getStatusCode());
             }
@@ -349,7 +355,6 @@ public final class DynatraceProvider extends EventProvider {
      */
     private synchronized void ensureSseStarted(String body) {
         if (!sseEnabled) {
-            log.info("SSE disabled by configuration; running in polling-only mode");
             return;
         }
         if (sseManager != null || shutdown.get()) {

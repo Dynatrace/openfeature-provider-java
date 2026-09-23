@@ -41,6 +41,18 @@ class PollingManagerTest {
         return manager;
     }
 
+    /** Manager with no-op callbacks and a cadence long enough that only explicit triggers fetch. */
+    private PollingManager createIdleTicker(Callable<FetchResult> fetchFlags) {
+        manager = new PollingManager(
+                fetchFlags,
+                body -> Collections.emptyList(),
+                keys -> {},
+                () -> {},
+                reason -> {},
+                Duration.ofSeconds(60));
+        return manager;
+    }
+
     @Test
     void successfulPollEmitsSuccess() throws InterruptedException {
         CountDownLatch latch = new CountDownLatch(1);
@@ -250,13 +262,7 @@ class PollingManagerTest {
     void setIntervalToShorterCadenceReAnchorsImmediately() throws InterruptedException {
         // start slow so no poll fires on its own, then switch to a fast cadence
         CountDownLatch polled = new CountDownLatch(2);
-        manager = new PollingManager(
-                () -> { polled.countDown(); return new FetchResult(304, null, null, null); },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60));
+        createIdleTicker(() -> { polled.countDown(); return new FetchResult(304, null, null, null); });
         manager.start();
         manager.setInterval(Duration.ofMillis(50));
 
@@ -343,17 +349,10 @@ class PollingManagerTest {
         // 60s interval means no poll would fire within the test window without a trigger
         CountDownLatch triggered = new CountDownLatch(1);
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     triggered.countDown();
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
         manager.triggerSseRefetch(null);
 
@@ -383,8 +382,7 @@ class PollingManagerTest {
         AtomicInteger fetches = new AtomicInteger();
         CountDownLatch secondFetch = new CountDownLatch(2);
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     int n = fetches.incrementAndGet();
                     secondFetch.countDown();
                     if (n == 1) {
@@ -394,13 +392,7 @@ class PollingManagerTest {
                         return new FetchResult(304, null, null, null);
                     }
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
 
         manager.triggerSseRefetch(2_000L);
@@ -422,21 +414,14 @@ class PollingManagerTest {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger fetches = new AtomicInteger();
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     int n = fetches.incrementAndGet();
                     if (n == 1) {
                         firstStarted.countDown();
                         release.await(5, TimeUnit.SECONDS);
                     }
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
 
         manager.triggerSseRefetch(2_000L);
@@ -464,8 +449,7 @@ class PollingManagerTest {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger fetches = new AtomicInteger();
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     int n = fetches.incrementAndGet();
                     if (n == 1) {
                         firstStarted.countDown();
@@ -473,13 +457,7 @@ class PollingManagerTest {
                         return new FetchResult(200, "{}", null, lastModifiedHeader);
                     }
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
 
         manager.triggerSseRefetch(1_700_000_000L);
@@ -502,8 +480,7 @@ class PollingManagerTest {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger fetches = new AtomicInteger();
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     int n = fetches.incrementAndGet();
                     if (n == 1) {
                         firstStarted.countDown();
@@ -511,13 +488,7 @@ class PollingManagerTest {
                         return new FetchResult(200, "{}", null, lastModifiedHeader);
                     }
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
 
         manager.triggerSseRefetch(1_700_000_000L);
@@ -545,8 +516,7 @@ class PollingManagerTest {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger fetches = new AtomicInteger();
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     int n = fetches.incrementAndGet();
                     if (n == 1) {
                         firstStarted.countDown();
@@ -554,13 +524,7 @@ class PollingManagerTest {
                         return new FetchResult(200, "{}", null, completedAt);
                     }
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
 
         manager.triggerSseRefetch(1_700_000_000L);
@@ -588,8 +552,7 @@ class PollingManagerTest {
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger fetches = new AtomicInteger();
 
-        manager = new PollingManager(
-                () -> {
+        createIdleTicker(() -> {
                     int n = fetches.incrementAndGet();
                     if (n == 1) {
                         firstStarted.countDown();
@@ -597,13 +560,7 @@ class PollingManagerTest {
                         return new FetchResult(200, "{}", null, completedAt);
                     }
                     return new FetchResult(304, null, null, null);
-                },
-                body -> Collections.emptyList(),
-                keys -> {},
-                () -> {},
-                reason -> {},
-                Duration.ofSeconds(60)
-        );
+                });
         manager.start();
 
         manager.triggerSseRefetch(1_700_000_000L);
