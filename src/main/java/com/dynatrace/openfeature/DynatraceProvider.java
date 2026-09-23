@@ -319,7 +319,10 @@ public final class DynatraceProvider extends EventProvider {
             ensureSseStarted(body);
         } catch (RuntimeException e) {
             // Keep going: the polling timer below is what lets this recover (spec §2.4).
+            // Nothing was applied, so drop any validators the failed fetch cached; otherwise the
+            // next poll revalidates to 304 and we would "recover" to READY with no flags loaded.
             initFailure = e;
+            fetcher.invalidateCache();
             state.set(ProviderState.ERROR);
             log.error("initialization failed; starting polling-only recovery at {}: {}",
                     pollIntervalDisconnected, e.getMessage());
@@ -542,6 +545,8 @@ public final class DynatraceProvider extends EventProvider {
             ensureSseStarted(json);
             return changed;
         } catch (FlagStoreException e) {
+            // This body was rejected, so the validators cached for it must not stand in for it.
+            fetcher.invalidateCache();
             throw new RuntimeException("failed to store flag configuration: " + e.getMessage(), e);
         }
     }

@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -1113,11 +1114,19 @@ class DynatraceProviderTest {
     void failedInitStartsSseOnceTheFirstPollSucceeds() throws Exception {
         // Init failure means no config, so no SSE URL. The provider must not stay polling-only
         // forever: the first successful poll carries the config that names the SSE endpoint.
+        // The config must actually name one, or this test would pass without SSE ever starting.
+        String configWithSse = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\","
+                + "\"endpoint\":{\"requestUri\":\"/sse\"}}]}";
+        assertNotNull(DynatraceProvider.extractSseUrl(configWithSse, "https://example.com"),
+                "fixture must carry an SSE URL for this test to mean anything");
+
         AtomicInteger requests = new AtomicInteger();
+        CountDownLatch sseConnected = new CountDownLatch(1);
         server.setDispatcher(new Dispatcher() {
             @Override
             public MockResponse dispatch(RecordedRequest request) {
                 if (request.getPath() != null && request.getPath().contains("/sse")) {
+                    sseConnected.countDown();
                     return new MockResponse()
                             .setResponseCode(200)
                             .addHeader("Content-Type", "text/event-stream")
@@ -1126,7 +1135,7 @@ class DynatraceProviderTest {
                 if (requests.getAndIncrement() < RetryStrategy.MAX_ATTEMPTS) {
                     return new MockResponse().setResponseCode(503);
                 }
-                return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                return new MockResponse().setResponseCode(200).setBody(configWithSse);
             }
         });
 
@@ -1134,6 +1143,38 @@ class DynatraceProviderTest {
         assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
 
         awaitState(p, ProviderState.READY, 5_000);
+        assertTrue(sseConnected.await(5, TimeUnit.SECONDS),
+                "the first successful poll should open the SSE connection the config names");
+        p.shutdown();
+    }
+
+    @Test
+    void invalidInitialConfigDoesNotRecoverToReadyOnA304() throws Exception {
+        // The initial 200 carries a body flagd-core rejects. CdnFetcher caches that response's
+        // ETag anyway, so the next poll revalidates and gets a 304. A 304 means "what you have
+        // is current", but nothing was ever applied, so recovering to READY would advertise an
+        // empty flag store as healthy.
+        String badEtag = "\"bad-config\"";
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                // A real CDN only answers 304 when the request presents matching validators.
+                if (badEtag.equals(request.getHeader(CdnFetcher.HEADER_IF_NONE_MATCH))) {
+                    return new MockResponse().setResponseCode(304);
+                }
+                return new MockResponse()
+                        .setResponseCode(200)
+                        .addHeader(CdnFetcher.HEADER_ETAG, badEtag)
+                        .setBody("{\"flags\": not-valid-json}");
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
+
+        Thread.sleep(400);
+        assertNotEquals(ProviderState.READY, p.getState(),
+                "a 304 for a config that was never applied must not report READY");
         p.shutdown();
     }
 

@@ -54,8 +54,8 @@ final class CdnFetcher {
     private final HttpClient httpClient;
     private final RetryStrategy retryStrategy;
 
-    // mutated only in doFetch(); guarded by fetchLock
-    private CacheState state = CacheState.EMPTY;
+    // mutated in doFetch() under fetchLock; also cleared by invalidateCache() from other threads
+    private volatile CacheState state = CacheState.EMPTY;
 
     // rate limit tracking; read outside the lock by isRateLimited()
     private final AtomicLong rateLimitedUntil = new AtomicLong(0);
@@ -71,6 +71,18 @@ final class CdnFetcher {
         this.url = URI.create(url);
         this.httpClient = httpClient;
         this.retryStrategy = retryStrategy;
+    }
+
+    /**
+     * Drops the cached ETag / Last-Modified so the next fetch is unconditional.
+     *
+     * <p>Call this when a fetched body could not be applied. The validators are stored as soon as
+     * a 2xx arrives, before the caller has had a chance to reject the body, so leaving them in
+     * place would make the next fetch revalidate to 304 ("what you have is current") for a config
+     * that was never actually loaded.
+     */
+    void invalidateCache() {
+        state = CacheState.EMPTY;
     }
 
     /** Returns true if a 429 Retry-After period is still active. */
