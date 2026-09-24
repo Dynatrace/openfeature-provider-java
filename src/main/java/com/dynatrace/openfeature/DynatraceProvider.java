@@ -515,6 +515,16 @@ public final class DynatraceProvider extends EventProvider {
         }
     }
 
+    /**
+     * The poll/fetch coordinator, or null before {@link #initialize} has run. Package-private so
+     * tests can drive the SSE-triggered re-fetch path (KB section 2.1.1) without standing up a live
+     * SSE stream, which would also switch the provider onto the SSE-connected poll cadence and so
+     * change the very timing under test.
+     */
+    PollingManager pollingManager() {
+        return pollingManager;
+    }
+
     private synchronized boolean cancelSseDisconnectTimer() {
         ScheduledFuture<?> timer = sseDisconnectTimer;
         if (timer == null) {
