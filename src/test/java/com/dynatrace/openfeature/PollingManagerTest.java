@@ -543,6 +543,54 @@ class PollingManagerTest {
 
     @Test
     @Timeout(10)
+    void deferredSseRefetchSurvivesAReFetchThatMadeNoRequest() throws InterruptedException {
+        // The re-fetch issued for a deferred announcement can come back skipped, having made no
+        // request at all (a Retry-After window opened while it was queued). That satisfies
+        // nothing, so consuming the announcement there loses it until the next tick, which on the
+        // SSE cadence is 10 minutes away. Here a reconnect catch-up (unknown, never droppable) is
+        // deferred, its re-fetch is skipped, and a later notification arrives for config we
+        // already hold: only the re-armed catch-up can still force a fetch.
+        String completedAt = "Tue, 14 Nov 2023 22:13:20 GMT"; // == 1700000000
+
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch fourthFetch = new CountDownLatch(4);
+        AtomicInteger fetches = new AtomicInteger();
+
+        createIdleTicker(() -> {
+                    int n = fetches.incrementAndGet();
+                    fourthFetch.countDown();
+                    if (n == 1) {
+                        firstStarted.countDown();
+                        release.await(5, TimeUnit.SECONDS);
+                        return new FetchResult(429, null, null, null);
+                    }
+                    // The deferred re-fetch hits the rate-limit gate before any request is made.
+                    return n == 2 ? FetchResult.skipped() : new FetchResult(304, null, null, completedAt);
+                });
+        manager.start();
+
+        manager.triggerSseRefetch(null);
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+        manager.triggerSseRefetch(null); // deferred behind the in-flight fetch
+        release.countDown();
+
+        Thread.sleep(300);
+        assertEquals(2, fetches.get(),
+                "a re-fetch that made no request must not resubmit itself, or it would spin for "
+                        + "the whole Retry-After window");
+
+        // Stands in for the first notification after the window closes, announcing config we
+        // already hold: on its own it is dropped as satisfied, so a fourth fetch can only come
+        // from the catch-up that the skipped re-fetch put back.
+        manager.triggerSseRefetch(1_700_000_000L);
+
+        assertTrue(fourthFetch.await(5, TimeUnit.SECONDS),
+                "the unknown-lastModified catch-up must survive a re-fetch that made no request");
+    }
+
+    @Test
+    @Timeout(10)
     void coalescedSseRefetchTreatsUnknownLastModifiedAsNotDroppable() throws InterruptedException {
         // A reconnect catch-up announces no lastModified. Unknown must win over any value,
         // since there is nothing to prove the completed fetch is new enough.

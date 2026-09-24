@@ -68,6 +68,12 @@ final class PollingManager {
     private Long pendingSseRefetchAt;
 
     /**
+     * Announcement the running fetch was issued for, or null when it is a plain poll tick. Kept so
+     * a re-fetch that turns out to make no request can put its announcement back.
+     */
+    private Long inFlightSseRefetchAt;
+
+    /**
      * @param fetchFlags      called to fetch flag configuration JSON from the CDN
      * @param storeFlags      called to store the fetched JSON; returns changed flag keys
      * @param emitChange      called with changed flag keys after a successful store
@@ -125,15 +131,15 @@ final class PollingManager {
         if (worker == null || worker.isShutdown()) {
             return;
         }
+        // Unknown stands in as the greatest value, so it is never coalesced away or dropped.
+        long announced = announcedLastModified == null ? LAST_MODIFIED_UNKNOWN : announcedLastModified;
         if (isFetchInFlight()) {
-            // Coalesce onto the greatest announcement; unknown wins, since it can never be dropped.
-            long announced = announcedLastModified == null ? LAST_MODIFIED_UNKNOWN : announcedLastModified;
             pendingSseRefetchAt =
                     pendingSseRefetchAt == null ? announced : Math.max(pendingSseRefetchAt, announced);
             log.debug("fetch in flight; deferring SSE re-fetch (lastModified={})", announcedLastModified);
             return;
         }
-        submit();
+        submit(announced);
     }
 
     /** Stops polling and shuts down the ticker and worker, interrupting any in-flight fetch. */
@@ -171,7 +177,7 @@ final class PollingManager {
             log.debug("poll tick skipped: a fetch is already in flight");
             return;
         }
-        submit();
+        submit(null);
     }
 
     private boolean isFetchInFlight() {
@@ -179,12 +185,18 @@ final class PollingManager {
         return current != null && !current.isDone();
     }
 
-    /** Caller must hold the monitor. */
-    private void submit() {
+    /**
+     * Caller must hold the monitor.
+     *
+     * @param sseRefetchAt announcement this fetch is issued for, or null for a plain poll tick
+     */
+    private void submit(Long sseRefetchAt) {
+        inFlightSseRefetchAt = sseRefetchAt;
         try {
             fetchInFlight = worker.submit(this::runFetch);
         } catch (RejectedExecutionException e) {
             // worker shut down between the guard and submit; ignore
+            inFlightSseRefetchAt = null;
         }
     }
 
@@ -203,15 +215,40 @@ final class PollingManager {
                 emitFailure.accept(e.getMessage());
             }
         } finally {
-            issuePendingSseRefetch(result);
+            onFetchComplete(result);
         }
+    }
+
+    /**
+     * Settles the SSE re-fetch bookkeeping now that a fetch has finished.
+     *
+     * @param completed result of the fetch that just finished, or null if it threw
+     */
+    private synchronized void onFetchComplete(FetchResult completed) {
+        Long issuedFor = inFlightSseRefetchAt;
+        inFlightSseRefetchAt = null;
+
+        if (completed != null && completed.isSkipped()) {
+            // No request was made, so a re-fetch we issued is still unsatisfied; put its
+            // announcement back rather than dropping it. Resubmitting here would just be skipped
+            // again (whatever blocked it, a Retry-After window or the fetch lock, still holds) and
+            // would spin, so the next fetch that actually reaches the CDN issues or drops it.
+            if (issuedFor != null) {
+                pendingSseRefetchAt = pendingSseRefetchAt == null
+                        ? issuedFor
+                        : Math.max(pendingSseRefetchAt, issuedFor);
+                log.debug("SSE re-fetch made no request; keeping it pending");
+            }
+            return;
+        }
+        issuePendingSseRefetch(completed);
     }
 
     /**
      * Issues the deferred SSE re-fetch, if any, now that the slot is free. Runs on the worker
      * thread, so the re-fetch it submits queues behind the current task rather than overlapping it.
      *
-     * @param completed result of the fetch that just finished, or null if it threw
+     * @param completed result of the fetch that just finished, which made a request
      */
     private synchronized void issuePendingSseRefetch(FetchResult completed) {
         if (pendingSseRefetchAt == null || worker == null || worker.isShutdown()) {
@@ -227,7 +264,7 @@ final class PollingManager {
             return;
         }
         log.debug("issuing deferred SSE re-fetch");
-        submit();
+        submit(announced);
     }
 
     private void handleResult(FetchResult result) {

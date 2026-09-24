@@ -103,6 +103,9 @@ public final class DynatraceProvider extends EventProvider {
     private final AtomicBoolean sseConnected = new AtomicBoolean(false);
 
     private volatile SseManager sseManager;
+
+    /** True while an SSE connection is being opened; reserves the slot without publishing it. */
+    private boolean sseStarting;
     private volatile PollingManager pollingManager;
 
     // grace timer: transitions STALE -> ERROR after grace period
@@ -356,27 +359,56 @@ public final class DynatraceProvider extends EventProvider {
      * SSE is enabled. Idempotent, so the post-failed-init recovery path can call it on the first
      * successful poll without risking a second stream.
      */
-    private synchronized void ensureSseStarted(String body) {
-        if (!sseEnabled) {
-            return;
+    private void ensureSseStarted(String body) {
+        SseManager sm;
+        synchronized (this) {
+            if (!sseEnabled || sseManager != null || sseStarting || shutdown.get()) {
+                return;
+            }
+            URI cdnUri = URI.create(cdnUrl);
+            String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
+            String sseUrl = extractSseUrl(body, cdnOrigin);
+            if (sseUrl == null) {
+                log.info("no SSE URL in CDN config; running in polling-only mode");
+                return;
+            }
+            sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
+            // Reserve the slot so a concurrent caller does not open a second stream while we
+            // connect below. start() runs outside the monitor so it cannot block shutdown.
+            sseStarting = true;
         }
-        if (sseManager != null || shutdown.get()) {
-            return;
-        }
-        URI cdnUri = URI.create(cdnUrl);
-        String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
-        String sseUrl = extractSseUrl(body, cdnOrigin);
-        if (sseUrl == null) {
-            log.info("no SSE URL in CDN config; running in polling-only mode");
-            return;
-        }
-        SseManager sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
+
+        boolean started = false;
         try {
             sm.start();
-            sseManager = sm;
+            started = true;
         } catch (Exception e) {
             log.warn("failed to start SSE connection; falling back to polling-only mode: {}", e.getMessage());
+        } finally {
+            // finally, not just the happy path: an Error out of start() would otherwise leave the
+            // slot reserved forever, and every later attempt would return at the guard above.
+            if (!publishSseManager(sm, started) && started) {
+                // shutdown() ran while we were connecting. It read sseManager before we could
+                // publish, so nothing else will ever stop this stream; close it here.
+                log.debug("provider shut down while SSE was connecting; closing the new stream");
+                sm.stop();
+            }
         }
+    }
+
+    /**
+     * Releases the reservation taken by {@link #ensureSseStarted} and publishes {@code sm} so
+     * {@link #shutdown()} can find it.
+     *
+     * @return true if {@code sm} was published, false if the caller still owns it
+     */
+    private synchronized boolean publishSseManager(SseManager sm, boolean started) {
+        sseStarting = false;
+        if (started && !shutdown.get()) {
+            sseManager = sm;
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -390,8 +422,13 @@ public final class DynatraceProvider extends EventProvider {
         }
         log.info("shutting down Dynatrace provider");
 
-        // spec §6.1: close SSE first
-        SseManager sm = sseManager;
+        // spec §6.1: close SSE first. Taking the monitor makes this atomic with the publish in
+        // ensureSseStarted: either we see the manager and stop it, or that publish sees the
+        // shutdown flag and closes the stream itself.
+        SseManager sm;
+        synchronized (this) {
+            sm = sseManager;
+        }
         if (sm != null) {
             sm.stop();
         }
