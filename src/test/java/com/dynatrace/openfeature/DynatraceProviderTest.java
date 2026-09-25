@@ -183,7 +183,7 @@ class DynatraceProviderTest {
             hook.finallyAfter(ctx, v1Details, Collections.emptyMap());
             hook.finallyAfter(ctx, v1Details, Collections.emptyMap());
 
-            // CDN poller detects a new config — seals the v1 batch and schedules an async flush.
+            // CDN poller detects a new config, sealing the v1 batch and schedules an async flush.
             // storeFlags must return immediately without blocking.
             String newConfig = FLAG_CONFIG.replace("1741780800", "1741780900");
             p.storeFlags(newConfig);
@@ -270,7 +270,7 @@ class DynatraceProviderTest {
 
             p.initialize(new ImmutableContext());
 
-            // Drive the hook directly — the OpenFeature SDK calls finallyAfter in production;
+            // Drive the hook directly: the OpenFeature SDK calls finallyAfter in production;
             // here we bypass the SDK to keep this a focused provider unit test.
             DynatraceMetricsHook hook = (DynatraceMetricsHook) p.getProviderHooks().get(0);
             HookContext<Object> ctx = booleanHookContext("my-bool-flag");
@@ -651,18 +651,18 @@ class DynatraceProviderTest {
     void extractSseUrl_returnsUrlForSseType() {
         String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\",\"url\":\"https://realtime.ably.io/event-stream?key=abc&channels=xyz\",\"inactivityDelaySec\":120}]}";
         assertEquals("https://realtime.ably.io/event-stream?key=abc&channels=xyz",
-                DynatraceProvider.extractSseUrl(config));
+                DynatraceProvider.extractSseUrl(config, null));
     }
 
     @Test
     void extractSseUrl_returnsNullWhenNoEventStreams() {
-        assertEquals(null, DynatraceProvider.extractSseUrl("{\"flags\":{}}"));
+        assertEquals(null, DynatraceProvider.extractSseUrl("{\"flags\":{}}", null));
     }
 
     @Test
     void extractSseUrl_returnsNullWhenNoSseTypeEntry() {
         String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"other\",\"url\":\"https://example.com\"}]}";
-        assertNull(DynatraceProvider.extractSseUrl(config));
+        assertNull(DynatraceProvider.extractSseUrl(config, null));
     }
 
     @Test
@@ -671,12 +671,12 @@ class DynatraceProviderTest {
                 + "{\"type\":\"webhook\",\"url\":\"https://hook.example.com\"},"
                 + "{\"type\":\"sse\",\"url\":\"https://realtime.ably.io/sse\"}"
                 + "]}";
-        assertEquals("https://realtime.ably.io/sse", DynatraceProvider.extractSseUrl(config));
+        assertEquals("https://realtime.ably.io/sse", DynatraceProvider.extractSseUrl(config, null));
     }
 
     @Test
     void extractSseUrl_returnsNullOnMalformedJson() {
-        assertNull(DynatraceProvider.extractSseUrl("not-json"));
+        assertNull(DynatraceProvider.extractSseUrl("not-json", null));
     }
 
     @Test
@@ -737,7 +737,7 @@ class DynatraceProviderTest {
         DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
         p.initialize(new ImmutableContext());
 
-        // simulate SSE connection — provider should stay READY despite poll failures
+        // simulate SSE connection: provider should stay READY despite poll failures
         p.onSseConnected();
 
         Thread.sleep(300); // allow polls to fire and fail
@@ -903,14 +903,14 @@ class DynatraceProviderTest {
                 connected, disconnected, Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
         p.initialize(new ImmutableContext());
 
-        // connected → slow cadence: no periodic poll should fire in a 300ms window
+        // connected, slow cadence: no periodic poll should fire in a 300ms window
         p.onSseConnected();
         Thread.sleep(100); // let the interval switch (and the connect-triggered fetch) settle
         fetches.set(0);
         Thread.sleep(300);
         int whileConnected = fetches.get();
 
-        // disconnected → after debounce, fast cadence: many polls in the same window
+        // disconnected, after debounce, fast cadence: many polls in the same window
         p.onSseDisconnected();
         Thread.sleep(TEST_SSE_DEBOUNCE.toMillis() + 100); // let escalation/interval switch settle
         fetches.set(0);

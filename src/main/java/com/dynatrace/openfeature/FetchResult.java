@@ -6,8 +6,7 @@ package com.dynatrace.openfeature;
  * <p>{@code body} is null on HTTP 304 (Not Modified); callers should skip updating
  * flagd-core in that case.
  *
- * <p>{@link #skipped()} is a distinct outcome from any HTTP status: no request was made, so it is
- * neither a success nor a failure and must not be reported as either (KB section 2.1.1).
+ * <p>{@link #skipped()} is a distinct outcome from any HTTP status: no request was made.
  */
 final class FetchResult {
 

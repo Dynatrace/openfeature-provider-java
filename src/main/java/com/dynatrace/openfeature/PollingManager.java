@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -20,9 +19,9 @@ import java.util.function.Function;
 /**
  * Manages periodic polling of flag configurations at a fixed, start-anchored cadence.
  *
- * <p>A ticker fires every {@code interval} — anchored to start, not to how long a poll takes, so
- * retry/backoff inside a poll never stretches the cadence — and hands the actual work to a single
- * worker thread. The ticker never blocks.
+ * <p>A ticker fires every {@code interval}, anchored to start rather than to how long a poll
+ * takes, so retry/backoff inside a poll never stretches the cadence, and hands the actual work to
+ * a single worker thread.
  *
  * <p><b>Single-flight (KB section 2.1.1).</b> At most one fetch runs at a time, and a contended
  * trigger is never cancelled-and-restarted:
@@ -58,7 +57,14 @@ final class PollingManager {
     private ScheduledExecutorService ticker;
     private ExecutorService worker;
     private ScheduledFuture<?> tickerFuture;
-    private Future<?> fetchInFlight;
+
+    /**
+     * True from the moment a fetch is submitted until {@link #onFetchComplete} has settled it.
+     * Tracked here rather than read off the submitted {@code Future}, whose {@code isDone()} only
+     * flips after the task returns: a trigger landing in that gap would defer behind a fetch that
+     * has already settled, stranding the announcement until the next tick.
+     */
+    private boolean fetchInFlight;
 
     /**
      * Announced epoch seconds of a deferred SSE re-fetch, or null when none is pending.
@@ -133,7 +139,7 @@ final class PollingManager {
         }
         // Unknown stands in as the greatest value, so it is never coalesced away or dropped.
         long announced = announcedLastModified == null ? LAST_MODIFIED_UNKNOWN : announcedLastModified;
-        if (isFetchInFlight()) {
+        if (fetchInFlight) {
             pendingSseRefetchAt =
                     pendingSseRefetchAt == null ? announced : Math.max(pendingSseRefetchAt, announced);
             log.debug("fetch in flight; deferring SSE re-fetch (lastModified={})", announcedLastModified);
@@ -145,6 +151,8 @@ final class PollingManager {
     /** Stops polling and shuts down the ticker and worker, interrupting any in-flight fetch. */
     synchronized void stop() {
         pendingSseRefetchAt = null;
+        inFlightSseRefetchAt = null;
+        fetchInFlight = false;
         if (ticker != null) {
             ticker.shutdownNow();
         }
@@ -172,17 +180,11 @@ final class PollingManager {
         if (worker == null || worker.isShutdown()) {
             return;
         }
-        if (isFetchInFlight()) {
-            // Emits nothing, so it does not reset the grace timer (KB section 2.1.1).
+        if (fetchInFlight) {
             log.debug("poll tick skipped: a fetch is already in flight");
             return;
         }
         submit(null);
-    }
-
-    private boolean isFetchInFlight() {
-        Future<?> current = fetchInFlight;
-        return current != null && !current.isDone();
     }
 
     /**
@@ -192,11 +194,13 @@ final class PollingManager {
      */
     private void submit(Long sseRefetchAt) {
         inFlightSseRefetchAt = sseRefetchAt;
+        fetchInFlight = true;
         try {
-            fetchInFlight = worker.submit(this::runFetch);
+            worker.submit(this::runFetch);
         } catch (RejectedExecutionException e) {
             // worker shut down between the guard and submit; ignore
             inFlightSseRefetchAt = null;
+            fetchInFlight = false;
         }
     }
 
@@ -227,6 +231,8 @@ final class PollingManager {
     private synchronized void onFetchComplete(FetchResult completed) {
         Long issuedFor = inFlightSseRefetchAt;
         inFlightSseRefetchAt = null;
+        // Frees the slot before anything below can re-submit into it.
+        fetchInFlight = false;
 
         if (completed != null && completed.isSkipped()) {
             // No request was made, so a re-fetch we issued is still unsatisfied; put its
@@ -268,7 +274,6 @@ final class PollingManager {
     }
 
     private void handleResult(FetchResult result) {
-        // No request made, so neither success nor failure: emit nothing and leave grace alone.
         if (result.isSkipped()) {
             log.debug("fetch skipped: no request was made");
             return;
@@ -280,7 +285,7 @@ final class PollingManager {
             return;
         }
 
-        // 429: rate limited; still serving cached values (spec §2.3)
+        // 429: rate limited; still serving cached values (spec 2.3)
         if (result.isRateLimited()) {
             log.debug("rate limited; serving cached values");
             return;

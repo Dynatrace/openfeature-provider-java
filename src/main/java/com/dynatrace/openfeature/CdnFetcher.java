@@ -95,9 +95,6 @@ final class CdnFetcher {
      *
      * <p>Returns {@link FetchResult#skipped()} without making a request when a fetch is already
      * in flight (KB section 2.1.1) or when inside an active Retry-After window (KB section 2.3).
-     * A skip must not be reported as a 304: it learned nothing, so treating it as a successful
-     * revalidation would reset the staleness grace timer and hold the provider in {@code READY}
-     * for the whole duration of a CDN outage.
      *
      * @return {@link FetchResult}; body is null on 304, 429, a skip, or on a stale-node response
      * @throws IOException on network failure after all retry attempts exhausted

@@ -369,7 +369,7 @@ class PollingManagerTest {
                 reason -> {},
                 Duration.ofMillis(50)
         );
-        // not started — should not throw
+        // not started: should not throw
         assertDoesNotThrow(() -> manager.triggerSseRefetch(1_000L));
     }
 

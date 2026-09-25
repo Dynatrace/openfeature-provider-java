@@ -58,10 +58,10 @@ public final class DynatraceProvider extends EventProvider {
 
     static final String PROVIDER_NAME = "dynatrace";
 
-    /** Poll interval when SSE is connected — SSE delivers notifications; polling is a safety net. */
+    /** Poll interval when SSE is connected: SSE delivers notifications, polling is a safety net. */
     static final Duration POLL_INTERVAL_SSE_CONNECTED = Duration.ofMinutes(10);
 
-    /** Poll interval when SSE is disconnected or disabled — aggressive to catch missed notifications. */
+    /** Poll interval when SSE is disconnected or disabled: aggressive, to catch missed notifications. */
     static final Duration POLL_INTERVAL_SSE_DISCONNECTED = Duration.ofSeconds(10);
 
     static final Duration GRACE_PERIOD = Duration.ofMinutes(1);
@@ -142,13 +142,13 @@ public final class DynatraceProvider extends EventProvider {
                 POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD, SSE_DISCONNECT_DEBOUNCE);
     }
 
-    // for testing — a single fixed poll interval for both SSE states (cadence independent of SSE)
+    // for testing: a single fixed poll interval for both SSE states (cadence independent of SSE)
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
         this(sdkKey, cdnUrl, flagdCore, fetcher, pollInterval, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
     }
 
-    // for testing — fixed poll interval plus an explicit SSE-disconnect debounce
+    // for testing: fixed poll interval plus an explicit SSE-disconnect debounce
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod, Duration sseDisconnectDebounce) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
@@ -169,7 +169,7 @@ public final class DynatraceProvider extends EventProvider {
                 pollInterval, pollInterval, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
     }
 
-    // for testing — distinct connected/disconnected cadences, to observe the SSE-transition consequence
+    // for testing: distinct connected/disconnected cadences, to observe the SSE-transition consequence
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollIntervalConnected, Duration pollIntervalDisconnected,
                       Duration gracePeriod, Duration sseDisconnectDebounce) {
@@ -257,18 +257,18 @@ public final class DynatraceProvider extends EventProvider {
      * Fetches the initial configuration from the CDN, opens the SSE connection, starts polling,
      * and starts the evaluation-metrics flusher.
      *
-     * <p>Initialization order (per spec §3.1):
+     * <p>Initialization order (per spec 3.1):
      * <ol>
      *   <li>Fetch flagd config JSON from CDN</li>
      *   <li>Load config into flagd-core</li>
      *   <li>Open SSE connection (async; errors handled by callbacks)</li>
      *   <li>Start polling timer, only once step 1 has completed, so the initial fetch never
-     *       contends with the first tick (spec §2.1.1)</li>
+     *       contends with the first tick (spec 2.1.1)</li>
      *   <li>Emit {@code PROVIDER_READY} (via return)</li>
      * </ol>
      *
      * <p>A failed initial fetch still starts the polling timer before rethrowing, so it recovers
-     * like any other failure (spec §2.4); otherwise a transient 5xx at startup would strand the
+     * like any other failure (spec 2.4); otherwise a transient 5xx at startup would strand the
      * provider in {@code ERROR} with nothing scheduled to retry. There is no config to read an
      * SSE URL from in that case, so it polls at the disconnected cadence until a poll succeeds
      * and SSE starts from the config that poll returned.
@@ -278,7 +278,7 @@ public final class DynatraceProvider extends EventProvider {
         String host = URI.create(cdnUrl).getHost();
         log.info("initializing Dynatrace feature flag provider (host={})", host);
         if (!sseEnabled) {
-            log.info("SSE disabled by configuration; running in polling-only mode");
+            log.debug("SSE disabled by configuration; running in polling-only mode");
         }
 
         // Created before the fetch: the failure path needs it for the grace timer.
@@ -318,12 +318,11 @@ public final class DynatraceProvider extends EventProvider {
 
             state.set(ProviderState.READY);
 
-            // open SSE connection (spec §3.1 step 3)
+            // open SSE connection (spec 3.1 step 3)
             ensureSseStarted(body);
         } catch (RuntimeException e) {
-            // Keep going: the polling timer below is what lets this recover (spec §2.4).
-            // Nothing was applied, so drop any validators the failed fetch cached; otherwise the
-            // next poll revalidates to 304 and we would "recover" to READY with no flags loaded.
+            // Don't rethrow yet: polling below recovers, and invalidating stops a phantom 304
+            // from "recovering" to READY with no flags loaded.
             initFailure = e;
             fetcher.invalidateCache();
             state.set(ProviderState.ERROR);
@@ -332,7 +331,7 @@ public final class DynatraceProvider extends EventProvider {
         }
 
         // Started only now, after the initial fetch has completed, so init never contends with
-        // the first tick (spec §2.1.1). Reached on the failure path too.
+        // the first tick (spec 2.1.1). Reached on the failure path too.
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
@@ -373,8 +372,7 @@ public final class DynatraceProvider extends EventProvider {
                 return;
             }
             sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);
-            // Reserve the slot so a concurrent caller does not open a second stream while we
-            // connect below. start() runs outside the monitor so it cannot block shutdown.
+            // Reserve the slot; start() runs outside the monitor so it cannot block shutdown.
             sseStarting = true;
         }
 
@@ -385,11 +383,9 @@ public final class DynatraceProvider extends EventProvider {
         } catch (Exception e) {
             log.warn("failed to start SSE connection; falling back to polling-only mode: {}", e.getMessage());
         } finally {
-            // finally, not just the happy path: an Error out of start() would otherwise leave the
-            // slot reserved forever, and every later attempt would return at the guard above.
+            // finally: an Error out of start() must not leave the slot reserved forever.
             if (!publishSseManager(sm, started) && started) {
-                // shutdown() ran while we were connecting. It read sseManager before we could
-                // publish, so nothing else will ever stop this stream; close it here.
+                // shutdown() read sseManager before we could publish, so nothing else stops this.
                 log.debug("provider shut down while SSE was connecting; closing the new stream");
                 sm.stop();
             }
@@ -422,9 +418,8 @@ public final class DynatraceProvider extends EventProvider {
         }
         log.info("shutting down Dynatrace provider");
 
-        // spec §6.1: close SSE first. Taking the monitor makes this atomic with the publish in
-        // ensureSseStarted: either we see the manager and stop it, or that publish sees the
-        // shutdown flag and closes the stream itself.
+        // spec 6.1: close SSE first. The monitor makes this atomic with the publish in
+        // ensureSseStarted, so exactly one of the two stops the stream.
         SseManager sm;
         synchronized (this) {
             sm = sseManager;
@@ -456,7 +451,7 @@ public final class DynatraceProvider extends EventProvider {
 
     synchronized void onSseConnected() {
         // A (re)connect aborts any pending disconnect escalation. If one was pending, the stream
-        // just blipped — pull current config in case we missed a change while it was down.
+        // just blipped, so pull current config in case we missed a change while it was down.
         boolean hadPendingDisconnect = cancelSseDisconnectTimer();
         boolean wasConnected = sseConnected.getAndSet(true);
         PollingManager pm = pollingManager;
@@ -500,8 +495,8 @@ public final class DynatraceProvider extends EventProvider {
     /**
      * Runs when an SSE fault has persisted past the debounce window: switch to the aggressive poll
      * cadence and go STALE. Switching the interval re-anchors the ticker, so the first fast poll is
-     * one (now short) interval away rather than up to a full SSE-connected interval — that closes
-     * the cadence gap without an extra out-of-band fetch that would instantly flap STALE→READY.
+     * one (now short) interval away rather than up to a full SSE-connected interval, which closes
+     * the cadence gap without an extra out-of-band fetch that would instantly flap STALE to READY.
      */
     private synchronized void escalateSseDisconnect() {
         if (!sseConnected.getAndSet(false)) {
@@ -538,7 +533,7 @@ public final class DynatraceProvider extends EventProvider {
      *   <li>Otherwise triggers a conditional GET against the CDN URL.</li>
      * </ul>
      *
-     * <p>The message is only a "something changed" signal — the fetch always pulls CDN-current
+     * <p>The message is only a "something changed" signal; the fetch always pulls CDN-current
      * config, and {@link CdnFetcher} rejects any response whose {@code Last-Modified} isn't newer
      * than what we last applied (it returns 304). Duplicate, stale, or out-of-order pokes
      * therefore collapse to a cheap conditional GET.
@@ -611,8 +606,8 @@ public final class DynatraceProvider extends EventProvider {
     /**
      * Handles a poll failure.
      *
-     * <p>Per spec §4.1: a poll failure stays {@code READY} when SSE is healthy —
-     * SSE continues to deliver notifications and the next poll will retry. Only
+     * <p>Per spec 4.1: a poll failure stays {@code READY} when SSE is healthy, since SSE
+     * continues to deliver notifications and the next poll will retry. Only
      * when SSE is also down do we transition to {@code STALE}.
      */
     private synchronized void onFetchFailure(String reason) {
@@ -712,11 +707,6 @@ public final class DynatraceProvider extends EventProvider {
     static String extractSseUrl(String configJson, String fallbackOrigin) {
         CdnConfigJSON config = CdnConfigJSON.parse(configJson);
         return config != null ? config.sseUrl(fallbackOrigin) : null;
-    }
-
-    /** Backward-compatible overload; structured endpoint without explicit origin returns null. */
-    static String extractSseUrl(String configJson) {
-        return extractSseUrl(configJson, null);
     }
 
     private static HttpClient buildDefaultHttpClient() {
