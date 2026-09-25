@@ -44,9 +44,9 @@ public class CdnStepDefinitions {
     private static final String BASE_KEY =
             "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5";
 
-    /** The cadence the suite runs at. Read from the provider so scenarios never hard-code it. */
+    /** Read from the provider, so scenarios assert against the real cadence rather than a copy. */
     private static final Duration POLL_INTERVAL = ProviderTestSupport.pollInterval();
-    /** Bound on one CDN attempt, also read from the provider (KB section 2.1). */
+    /** Bound on one CDN attempt (KB section 2.1). */
     private static final Duration REQUEST_TIMEOUT = ProviderTestSupport.requestTimeout();
 
     /** Longer than the poll cadence, so a refresh is observed. */
@@ -169,20 +169,13 @@ public class CdnStepDefinitions {
         markArranged();
     }
 
-    /**
-     * Makes every programmed response outlive a single attempt, so a fetch burns its whole budget
-     * (two attempts, each abandoned at the request timeout) and is still running when the next
-     * tick fires.
-     */
+    /** Outlives a whole fetch (two attempts, each abandoned at the timeout), so it spans a tick. */
     @Given("the CDN responds slower than the request timeout")
     public void theCdnRespondsSlowerThanTheRequestTimeout() {
         delayProgrammedResponses(REQUEST_TIMEOUT.multipliedBy(4));
     }
 
-    /**
-     * Makes a fetch take real time without ever timing out, so the gap between a fetch starting
-     * and completing is large enough to tell the two candidate cadence anchors apart.
-     */
+    /** Takes real time without timing out, so fetch start and fetch end are far enough apart to tell apart. */
     @Given("the CDN responds slowly but within the request timeout")
     public void theCdnRespondsSlowlyButWithinTheRequestTimeout() {
         delayProgrammedResponses(REQUEST_TIMEOUT.minusSeconds(1));
@@ -244,10 +237,7 @@ public class CdnStepDefinitions {
         await(POLL_TIMEOUT, () -> mockServer.cdnRequestCount() > baseline);
     }
 
-    /**
-     * Waits out whole poll intervals. The baseline is taken before sleeping, so the assertion that
-     * follows counts exactly the requests these intervals produced.
-     */
+    /** Baseline is taken before sleeping, so the next assertion counts what these intervals produced. */
     @When("{int} poll interval(s) elapse(s)")
     public void pollIntervalsElapse(int intervals) {
         resetCountBaseline();
@@ -270,11 +260,7 @@ public class CdnStepDefinitions {
         sleep(retryAfter.plus(TICK_MARGIN));
     }
 
-    /**
-     * Occupies the fetch slot just before a tick, so the tick has something to contend with. The
-     * re-fetch is requested directly rather than over a live SSE stream: opening one would also
-     * move the provider onto the SSE-connected cadence and change the timing under test.
-     */
+    /** Occupies the fetch slot just before a tick, so the tick has something to contend with. */
     @When("an SSE re-fetch is triggered shortly before the next poll tick")
     public void anSseRefetchIsTriggeredShortlyBeforeTheNextPollTick() {
         sleepUntil(nextTickAtMs() - SHORTLY_BEFORE.toMillis());
@@ -342,8 +328,7 @@ public class CdnStepDefinitions {
 
     /**
      * Asserts the cadence is anchored to when each fetch was issued, not to when it finished, by
-     * measuring the gap between the first request of consecutive ticks. A tick that retries issues
-     * two requests; those are grouped back onto the tick that made them.
+     * measuring the gap between the first request of consecutive ticks.
      */
     @Then("consecutive poll ticks are one poll interval apart")
     public void consecutivePollTicksAreOnePollIntervalApart() {
@@ -357,9 +342,8 @@ public class CdnStepDefinitions {
     }
 
     /**
-     * Asserts the polling timer starts once initialization has finished, not when it began. With a
-     * slow but successful initial fetch the two differ by the fetch duration, which is what makes
-     * the wrong anchor observable.
+     * Asserts the polling timer starts once initialization has finished, not when it began. A slow
+     * initial fetch is what separates the two anchors enough to tell them apart.
      */
     @Then("the first poll tick is one poll interval after initialization completed")
     public void theFirstPollTickIsOnePollIntervalAfterInitializationCompleted() {
@@ -399,7 +383,7 @@ public class CdnStepDefinitions {
 
     // ---- helpers ---------------------------------------------------------
 
-    /** Programs the CDN and remembers the sequence, so a later step can layer a delay onto it. */
+    /** Remembers the sequence too, so a later step can layer a delay onto it. */
     private void program(List<CdnResponse> responses) {
         programmed = List.copyOf(responses);
         mockServer.programCdn(programmed);
@@ -436,7 +420,6 @@ public class CdnStepDefinitions {
         return pollingStartedAtMs + (elapsed / period + 1) * period;
     }
 
-    /** Arrival time of the first CDN request after {@code epochMs}, or null if there is none yet. */
     private Long firstRequestAfter(long epochMs) {
         return mockServer.cdnRequests().stream()
                 .map(r -> r.receivedAtMs)
