@@ -368,7 +368,7 @@ public final class DynatraceProvider extends EventProvider {
             String cdnOrigin = cdnUri.getScheme() + "://" + cdnUri.getAuthority();
             String sseUrl = extractSseUrl(body, cdnOrigin);
             if (sseUrl == null) {
-                log.info("no SSE URL in CDN config; running in polling-only mode");
+                // The server always sends eventStreams, so this is not worth logging.
                 return;
             }
             sm = new SseManager(sseUrl, this::onSseConnected, this::onSseDisconnected, this::onSseMessage);

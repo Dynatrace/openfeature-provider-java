@@ -96,6 +96,12 @@ final class CdnFetcher {
      * <p>Returns {@link FetchResult#skipped()} without making a request when a fetch is already
      * in flight (KB section 2.1.1) or when inside an active Retry-After window (KB section 2.3).
      *
+     * <p>{@link PollingManager} already serialises its own fetches, so the in-flight guard is
+     * defence in depth for callers outside it: {@link DynatraceProvider#initialize} fetches on the
+     * caller's thread. It is what keeps {@link #state} consistent, since a conditional request
+     * reads the validators before sending and stores the new pair after, and interleaving two
+     * fetches could store an ETag and a Last-Modified that came from different responses.
+     *
      * @return {@link FetchResult}; body is null on 304, 429, a skip, or on a stale-node response
      * @throws IOException on network failure after all retry attempts exhausted
      */
