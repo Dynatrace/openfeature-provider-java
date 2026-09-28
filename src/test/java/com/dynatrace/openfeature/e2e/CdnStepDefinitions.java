@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>Black-box: the provider is embedded in an OpenFeature SDK instance rather than driven
  * directly. Each scenario binds a fresh {@link DynatraceProvider} to its own OpenFeature
  * {@code domain} via {@link OpenFeatureAPI#setProviderAndWait}, and every observation goes through
- * that SDK surface — flags are read with an OpenFeature {@link Client} and readiness is read from
+ * that SDK surface: flags are read with an OpenFeature {@link Client} and readiness is read from
  * {@link Client#getProviderState()} (fed by the provider's OpenFeature events). Every component the
  * provider talks to is emulated by the containerized {@link MockServer}, programmed via its HTTP control API.
  */
@@ -147,7 +147,7 @@ public class CdnStepDefinitions {
     }
 
     // Unquoted "null" in the outline denotes an absent body (no body at all), as opposed to the
-    // empty-string body "" — {string} only matches quoted values, so this needs its own step.
+    // empty-string body "": {string} only matches quoted values, so this needs its own step.
     @When("the CDN responds with status {int} and body null")
     public void theCdnRespondsWithStatusAndBodyNull(int status) {
         mockServer.programCdn(CdnResponse.status(status));

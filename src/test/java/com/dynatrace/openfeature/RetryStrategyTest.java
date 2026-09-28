@@ -72,34 +72,50 @@ class RetryStrategyTest {
     }
 
     @Test
-    void recoversAfterTransientFailure() throws IOException {
+    void recoversAfterTransientFailureOnTheSingleRetry() throws IOException {
         AtomicInteger attempts = new AtomicInteger();
         FetchResult ok = new FetchResult(200, "{}", null, null);
 
         FetchResult result = strategy().execute(() -> {
-            if (attempts.incrementAndGet() < 3) {
+            if (attempts.incrementAndGet() < 2) {
                 return new FetchResult(503, null, null, null);
             }
             return ok;
         });
 
         assertEquals(200, result.getStatusCode());
-        assertEquals(3, attempts.get());
-        assertEquals(2, sleeps.size());
+        assertEquals(2, attempts.get());
+        assertEquals(1, sleeps.size());
     }
 
     @Test
-    void backoffDelaysIncreaseExponentially() throws IOException {
+    void capsAtTwoAttemptsWithOneBackoff() throws IOException {
+        // KB 2.4: one retry, not a loop; the fetch must stay short enough that it cannot
+        // outlive the shortest poll interval (KB 2.1).
+        assertEquals(2, RetryStrategy.MAX_ATTEMPTS);
+
+        AtomicInteger attempts = new AtomicInteger();
+        strategy().execute(() -> {
+            attempts.incrementAndGet();
+            return new FetchResult(500, null, null, null);
+        });
+
+        assertEquals(2, attempts.get());
+        assertEquals(1, sleeps.size());
+    }
+
+    @Test
+    void backoffIsFixedBaseDelayPlusJitter() throws IOException {
         FetchResult serverError = new FetchResult(500, null, null, null);
 
         strategy().execute(() -> serverError);
 
-        // delays should increase: each >= previous (with jitter they could be slightly off)
-        for (int i = 1; i < sleeps.size(); i++) {
-            assertTrue(sleeps.get(i) >= sleeps.get(i - 1),
-                    "delay " + i + " (" + sleeps.get(i) + ") should be >= delay " + (i - 1)
-                            + " (" + sleeps.get(i - 1) + ")");
-        }
+        assertEquals(1, sleeps.size());
+        long delay = sleeps.get(0);
+        assertTrue(delay >= RetryStrategy.BASE_DELAY_MS,
+                "delay " + delay + " should be at least the base delay");
+        assertTrue(delay <= RetryStrategy.BASE_DELAY_MS * (1 + RetryStrategy.MAX_JITTER_FACTOR),
+                "delay " + delay + " should not exceed base delay + 20% jitter");
     }
 
     @Test

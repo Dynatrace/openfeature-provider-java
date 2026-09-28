@@ -1,5 +1,6 @@
 package com.dynatrace.openfeature;
 
+import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -10,6 +11,11 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -121,8 +127,8 @@ class CdnFetcherTest {
     }
 
     @Test
-    void serverErrorRecoveryOnRetry() throws IOException {
-        server.enqueue(new MockResponse().setResponseCode(503));
+    void serverErrorRecoveryOnTheSingleRetry() throws IOException {
+        // KB 2.4: two attempts total, so recovery has to happen on the first (and only) retry
         server.enqueue(new MockResponse().setResponseCode(503));
         server.enqueue(new MockResponse()
                 .setResponseCode(200)
@@ -132,23 +138,28 @@ class CdnFetcherTest {
         FetchResult result = fetcher().fetch();
 
         assertTrue(result.isSuccess());
-        assertEquals(3, server.getRequestCount());
+        assertEquals(2, server.getRequestCount());
     }
 
     @Test
-    void rateLimitedReturns429WithoutNetworkCall() throws IOException {
+    void ticksInsideTheRetryAfterWindowAreSkippedWithoutNetworkCall() throws IOException {
+        // KB 2.3: the 429 ends the fetch and opens a rate-limit window; ticks inside that
+        // window make no request, so they are skipped rather than reported as an outcome.
         server.enqueue(new MockResponse()
                 .setResponseCode(429)
                 .addHeader(CdnFetcher.HEADER_RETRY_AFTER, "60"));
 
         CdnFetcher fetcher = fetcher();
         FetchResult first = fetcher.fetch();
-        assertEquals(429, first.getStatusCode());
+        assertEquals(429, first.getStatusCode(), "the response that opens the window is a real 429");
+        assertFalse(first.isSkipped());
         assertTrue(fetcher.isRateLimited());
 
-        FetchResult second = fetcher.fetch();
-        assertEquals(429, second.getStatusCode());
-        assertEquals(1, server.getRequestCount());
+        FetchResult suppressed = fetcher.fetch();
+        assertTrue(suppressed.isSkipped(), "a tick inside the window should be skipped");
+        assertFalse(suppressed.isSuccess());
+        assertFalse(suppressed.isNotModified(), "a suppressed tick must not masquerade as a 304");
+        assertEquals(1, server.getRequestCount(), "no request should be made inside the window");
     }
 
     @Test
@@ -240,5 +251,44 @@ class CdnFetcherTest {
 
         assertTrue(result.isSuccess());
         assertEquals("new-body", result.getBody());
+    }
+
+    @Test
+    void concurrentFetchIsSkippedNotReportedAs304() throws Exception {
+        // KB 2.1.1: a contended fetch must be distinguishable from a successful revalidation.
+        // Reporting it as 304 makes it look like a successful poll and resets the grace timer.
+        CountDownLatch firstInFlight = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) throws InterruptedException {
+                firstInFlight.countDown();
+                release.await(5, TimeUnit.SECONDS);
+                return new MockResponse().setResponseCode(200).setBody(MINIMAL_FLAGS_BODY);
+            }
+        });
+
+        CdnFetcher fetcher = fetcher();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<FetchResult> first = executor.submit(fetcher::fetch);
+            assertTrue(firstInFlight.await(2, TimeUnit.SECONDS), "first fetch should reach the server");
+
+            FetchResult contended = fetcher.fetch();
+
+            assertTrue(contended.isSkipped(), "a contended fetch should report as skipped");
+            assertFalse(contended.isNotModified(), "a skipped fetch must not masquerade as a 304");
+            assertFalse(contended.isSuccess());
+            assertFalse(contended.isRateLimited());
+
+            release.countDown();
+            assertTrue(first.get(5, TimeUnit.SECONDS).isSuccess(),
+                    "the in-flight fetch should complete normally");
+            assertEquals(1, server.getRequestCount(), "the contended caller must not make a request");
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
     }
 }

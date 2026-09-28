@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -77,9 +78,13 @@ class DynatraceProviderTest {
     }
 
     private DynatraceProvider fastProvider(Duration gracePeriod) {
+        return provider(Duration.ofMillis(50), gracePeriod);
+    }
+
+    private DynatraceProvider provider(Duration pollInterval, Duration gracePeriod) {
         CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
         return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
-                Duration.ofMillis(50), gracePeriod, TEST_SSE_DEBOUNCE);
+                pollInterval, gracePeriod, TEST_SSE_DEBOUNCE);
     }
 
     /** Polls {@code provider.getState()} until it equals {@code expected} or the timeout elapses. */
@@ -178,7 +183,7 @@ class DynatraceProviderTest {
             hook.finallyAfter(ctx, v1Details, Collections.emptyMap());
             hook.finallyAfter(ctx, v1Details, Collections.emptyMap());
 
-            // CDN poller detects a new config — seals the v1 batch and schedules an async flush.
+            // CDN poller detects a new config, sealing the v1 batch and schedules an async flush.
             // storeFlags must return immediately without blocking.
             String newConfig = FLAG_CONFIG.replace("1741780800", "1741780900");
             p.storeFlags(newConfig);
@@ -265,7 +270,7 @@ class DynatraceProviderTest {
 
             p.initialize(new ImmutableContext());
 
-            // Drive the hook directly — the OpenFeature SDK calls finallyAfter in production;
+            // Drive the hook directly: the OpenFeature SDK calls finallyAfter in production;
             // here we bypass the SDK to keep this a focused provider unit test.
             DynatraceMetricsHook hook = (DynatraceMetricsHook) p.getProviderHooks().get(0);
             HookContext<Object> ctx = booleanHookContext("my-bool-flag");
@@ -646,18 +651,18 @@ class DynatraceProviderTest {
     void extractSseUrl_returnsUrlForSseType() {
         String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\",\"url\":\"https://realtime.ably.io/event-stream?key=abc&channels=xyz\",\"inactivityDelaySec\":120}]}";
         assertEquals("https://realtime.ably.io/event-stream?key=abc&channels=xyz",
-                DynatraceProvider.extractSseUrl(config));
+                DynatraceProvider.extractSseUrl(config, null));
     }
 
     @Test
     void extractSseUrl_returnsNullWhenNoEventStreams() {
-        assertEquals(null, DynatraceProvider.extractSseUrl("{\"flags\":{}}"));
+        assertEquals(null, DynatraceProvider.extractSseUrl("{\"flags\":{}}", null));
     }
 
     @Test
     void extractSseUrl_returnsNullWhenNoSseTypeEntry() {
         String config = "{\"flags\":{},\"eventStreams\":[{\"type\":\"other\",\"url\":\"https://example.com\"}]}";
-        assertNull(DynatraceProvider.extractSseUrl(config));
+        assertNull(DynatraceProvider.extractSseUrl(config, null));
     }
 
     @Test
@@ -666,12 +671,12 @@ class DynatraceProviderTest {
                 + "{\"type\":\"webhook\",\"url\":\"https://hook.example.com\"},"
                 + "{\"type\":\"sse\",\"url\":\"https://realtime.ably.io/sse\"}"
                 + "]}";
-        assertEquals("https://realtime.ably.io/sse", DynatraceProvider.extractSseUrl(config));
+        assertEquals("https://realtime.ably.io/sse", DynatraceProvider.extractSseUrl(config, null));
     }
 
     @Test
     void extractSseUrl_returnsNullOnMalformedJson() {
-        assertNull(DynatraceProvider.extractSseUrl("not-json"));
+        assertNull(DynatraceProvider.extractSseUrl("not-json", null));
     }
 
     @Test
@@ -732,7 +737,7 @@ class DynatraceProviderTest {
         DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
         p.initialize(new ImmutableContext());
 
-        // simulate SSE connection — provider should stay READY despite poll failures
+        // simulate SSE connection: provider should stay READY despite poll failures
         p.onSseConnected();
 
         Thread.sleep(300); // allow polls to fire and fail
@@ -898,14 +903,14 @@ class DynatraceProviderTest {
                 connected, disconnected, Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
         p.initialize(new ImmutableContext());
 
-        // connected → slow cadence: no periodic poll should fire in a 300ms window
+        // connected, slow cadence: no periodic poll should fire in a 300ms window
         p.onSseConnected();
         Thread.sleep(100); // let the interval switch (and the connect-triggered fetch) settle
         fetches.set(0);
         Thread.sleep(300);
         int whileConnected = fetches.get();
 
-        // disconnected → after debounce, fast cadence: many polls in the same window
+        // disconnected, after debounce, fast cadence: many polls in the same window
         p.onSseDisconnected();
         Thread.sleep(TEST_SSE_DEBOUNCE.toMillis() + 100); // let escalation/interval switch settle
         fetches.set(0);
@@ -1060,5 +1065,173 @@ class DynatraceProviderTest {
         assertNull(SseMessage.parse(""));
         assertNull(SseMessage.parse("not-json"));
         assertNull(SseMessage.parse("{\"lastModified\":1}"));
+    }
+
+    /** provider whose recovery polling is slow enough not to race assertions about init. */
+    @Test
+    void initialFetchGivesUpAfterTheBoundedAttemptCount() throws IOException {
+        // KB 2.4: the 2-attempt cap applies to the initial fetch too; a failing init gives up
+        // in seconds rather than retrying for half a minute.
+        for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS; i++) {
+            server.enqueue(new MockResponse().setResponseCode(503));
+        }
+
+        DynatraceProvider p = provider(Duration.ofSeconds(30), Duration.ofMillis(200));
+
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
+        assertEquals(RetryStrategy.MAX_ATTEMPTS, server.getRequestCount(),
+                "initial fetch should make exactly " + RetryStrategy.MAX_ATTEMPTS + " attempts");
+        p.shutdown();
+    }
+
+    @Test
+    void failedInitStillStartsPollingAndRecovers() throws Exception {
+        // KB 2.4: a failed init recovers on the polling timer like any other failure. Without
+        // one, a transient 5xx at startup would wedge the provider in ERROR until restart.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                // fail the whole initial fetch (both attempts), then serve a good config
+                if (requests.getAndIncrement() < RetryStrategy.MAX_ATTEMPTS) {
+                    return new MockResponse().setResponseCode(503);
+                }
+                return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()),
+                "a failed initial fetch should still surface to the caller");
+        assertEquals(ProviderState.ERROR, p.getState());
+
+        awaitState(p, ProviderState.READY, 5_000);
+        p.shutdown();
+    }
+
+    @Test
+    void failedInitStartsSseOnceTheFirstPollSucceeds() throws Exception {
+        // Init failure means no config, so no SSE URL. The provider must not stay polling-only
+        // forever: the first successful poll carries the config that names the SSE endpoint.
+        // The config must actually name one, or this test would pass without SSE ever starting.
+        String configWithSse = "{\"flags\":{},\"eventStreams\":[{\"type\":\"sse\","
+                + "\"endpoint\":{\"requestUri\":\"/sse\"}}]}";
+        assertNotNull(DynatraceProvider.extractSseUrl(configWithSse, "https://example.com"),
+                "fixture must carry an SSE URL for this test to mean anything");
+
+        AtomicInteger requests = new AtomicInteger();
+        CountDownLatch sseConnected = new CountDownLatch(1);
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (request.getPath() != null && request.getPath().contains("/sse")) {
+                    sseConnected.countDown();
+                    return new MockResponse()
+                            .setResponseCode(200)
+                            .addHeader("Content-Type", "text/event-stream")
+                            .setBody(": connected\n\n");
+                }
+                if (requests.getAndIncrement() < RetryStrategy.MAX_ATTEMPTS) {
+                    return new MockResponse().setResponseCode(503);
+                }
+                return new MockResponse().setResponseCode(200).setBody(configWithSse);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
+
+        awaitState(p, ProviderState.READY, 5_000);
+        assertTrue(sseConnected.await(5, TimeUnit.SECONDS),
+                "the first successful poll should open the SSE connection the config names");
+        p.shutdown();
+    }
+
+    @Test
+    void invalidInitialConfigDoesNotRecoverToReadyOnA304() throws Exception {
+        // The initial 200 carries a body flagd-core rejects. CdnFetcher caches that response's
+        // ETag anyway, so the next poll revalidates and gets a 304. A 304 means "what you have
+        // is current", but nothing was ever applied, so recovering to READY would advertise an
+        // empty flag store as healthy.
+        String badEtag = "\"bad-config\"";
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                // A real CDN only answers 304 when the request presents matching validators.
+                if (badEtag.equals(request.getHeader(CdnFetcher.HEADER_IF_NONE_MATCH))) {
+                    return new MockResponse().setResponseCode(304);
+                }
+                return new MockResponse()
+                        .setResponseCode(200)
+                        .addHeader(CdnFetcher.HEADER_ETAG, badEtag)
+                        .setBody("{\"flags\": not-valid-json}");
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        assertThrows(RuntimeException.class, () -> p.initialize(new ImmutableContext()));
+
+        Thread.sleep(400);
+        assertNotEquals(ProviderState.READY, p.getState(),
+                "a 304 for a config that was never applied must not report READY");
+        p.shutdown();
+    }
+
+    @Test
+    void skippedPollTicksDoNotResetTheGraceTimer() throws Exception {
+        // KB 2.1.1: a skipped tick emits nothing. Reported as a success it would cancel grace
+        // on every tick, holding the provider in READY for a whole CDN outage.
+        //
+        // Each failing response is delayed past the 50ms poll cadence, so most ticks contend.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (requests.getAndIncrement() == 0) {
+                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                }
+                return new MockResponse()
+                        .setResponseCode(503)
+                        .setHeadersDelay(120, TimeUnit.MILLISECONDS);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofMillis(200));
+        p.initialize(new ImmutableContext());
+
+        // SSE never connects, so the first real failure goes STALE and starts the grace timer;
+        // the skipped ticks in between must not keep cancelling it.
+        awaitState(p, ProviderState.ERROR, 5_000);
+        p.shutdown();
+    }
+
+    @Test
+    void contendedTicksDoNotPileUpRequests() throws Exception {
+        // Single-flight: with responses slower than the cadence, the request count must track
+        // fetch duration, not tick count.
+        AtomicInteger requests = new AtomicInteger();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                if (requests.getAndIncrement() == 0) {
+                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
+                }
+                return new MockResponse()
+                        .setResponseCode(304)
+                        .setHeadersDelay(150, TimeUnit.MILLISECONDS);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+
+        Thread.sleep(600);
+        p.shutdown();
+
+        // ~12 ticks fit in 600ms at a 50ms cadence; at 150ms per fetch only ~4 can actually run.
+        int actual = requests.get();
+        assertTrue(actual <= 7,
+                "expected contended ticks to be skipped, but " + actual + " requests were made");
     }
 }

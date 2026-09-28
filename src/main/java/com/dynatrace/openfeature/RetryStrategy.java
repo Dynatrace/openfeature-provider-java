@@ -8,27 +8,33 @@ import java.util.Random;
 import java.util.concurrent.Callable;
 
 /**
- * Exponential backoff with jitter for transient HTTP failures.
+ * Bounded retry for transient HTTP failures: one retry after a short jittered delay.
  *
  * <p>Retries on 5xx and network/timeout errors. Does not retry 4xx
- * (429 is handled separately by {@link CdnFetcher}).
+ * (429 is handled separately by {@link CdnFetcher}, and ends the fetch outright).
  *
  * <p>Parameters per KB section 2.4:
  * <ul>
- *   <li>Base delay: 100ms</li>
- *   <li>Multiplier: 2x</li>
+ *   <li>Max attempts: 2 (initial attempt + 1 retry)</li>
+ *   <li>Backoff: 100ms before the retry</li>
  *   <li>Jitter: +0-20% additive random</li>
- *   <li>Max attempts: 5</li>
  * </ul>
+ *
+ * <p>One retry, not a loop: a fetch must not outlive the shortest poll interval (KB section 2.1),
+ * so beyond the single retry recovery is the next poll tick's job. {@code RetryBoundInvariantTest}
+ * guards the arithmetic.
  */
 final class RetryStrategy {
 
     private static final Logger log = LoggerFactory.getLogger(RetryStrategy.class);
 
-    static final int MAX_ATTEMPTS = 5;
+    static final int MAX_ATTEMPTS = 2;
     static final long BASE_DELAY_MS = 100L;
-    static final double MULTIPLIER = 2.0;
     static final double MAX_JITTER_FACTOR = 0.20;
+
+    /** Worst-case sleep across a whole fetch; an input to the fetch-duration invariant. */
+    static final long MAX_TOTAL_BACKOFF_MS =
+            (long) ((MAX_ATTEMPTS - 1) * BASE_DELAY_MS * (1 + MAX_JITTER_FACTOR));
 
     private final Random random;
     private final Sleeper sleeper;
@@ -52,7 +58,6 @@ final class RetryStrategy {
     FetchResult execute(Callable<FetchResult> request) throws IOException {
         IOException lastNetworkError = null;
         FetchResult lastResult = null;
-        long delayMs = BASE_DELAY_MS;
 
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
@@ -63,26 +68,26 @@ final class RetryStrategy {
                     return result;
                 }
 
-                log.warn("attempt {}/{} returned HTTP {}; retrying",
-                        attempt, MAX_ATTEMPTS, result.getStatusCode());
+                log.warn("attempt {}/{} returned HTTP {}{}",
+                        attempt, MAX_ATTEMPTS, result.getStatusCode(),
+                        attempt < MAX_ATTEMPTS ? "; retrying" : "; giving up");
             } catch (IOException e) {
                 lastNetworkError = e;
-                log.warn("attempt {}/{} failed: {}; retrying",
-                        attempt, MAX_ATTEMPTS, e.getMessage());
+                log.warn("attempt {}/{} failed: {}{}",
+                        attempt, MAX_ATTEMPTS, e.getMessage(),
+                        attempt < MAX_ATTEMPTS ? "; retrying" : "; giving up");
             } catch (Exception e) {
                 throw new IOException("unexpected error during fetch", e);
             }
 
             if (attempt < MAX_ATTEMPTS) {
-                long jitter = (long) (delayMs * random.nextDouble() * MAX_JITTER_FACTOR);
-                long sleep = delayMs + jitter;
+                long jitter = (long) (BASE_DELAY_MS * random.nextDouble() * MAX_JITTER_FACTOR);
                 try {
-                    sleeper.sleep(sleep);
+                    sleeper.sleep(BASE_DELAY_MS + jitter);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw new IOException("interrupted during retry backoff", ie);
                 }
-                delayMs = (long) (delayMs * MULTIPLIER);
             }
         }
 

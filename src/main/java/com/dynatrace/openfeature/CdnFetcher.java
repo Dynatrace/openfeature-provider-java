@@ -11,10 +11,8 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -27,8 +25,9 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li>Last-Modified / If-Modified-Since revalidation; defends against stale CDN nodes
  *       by rejecting 200 responses whose {@code Last-Modified} is not strictly later than
  *       the previously stored value.</li>
- *   <li>Retry with exponential backoff on 5xx / network errors (via {@link RetryStrategy})</li>
- *   <li>429 / Retry-After rate limiting</li>
+ *   <li>Bounded retry on 5xx / network errors (via {@link RetryStrategy})</li>
+ *   <li>429 / Retry-After rate limiting; a 429 ends the fetch and is never retried in-place</li>
+ *   <li>Single-flight: a fetch arriving while another is in progress is skipped, not queued</li>
  * </ul>
  */
 final class CdnFetcher {
@@ -41,12 +40,12 @@ final class CdnFetcher {
     static final String HEADER_IF_MODIFIED_SINCE = "If-Modified-Since";
     static final String HEADER_RETRY_AFTER = "Retry-After";
 
-    /** RFC 7231 IMF-fixdate canonical form (always GMT, two-digit day). */
-    private static final DateTimeFormatter HEADER_DATE_FORMATTER =
-            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ENGLISH);
-
-    /** bounds how long a single attempt holds the polling worker thread; ensures next-tick cancellation takes effect promptly */
-    static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
+    /**
+     * Bounds a single attempt. With {@link RetryStrategy#MAX_ATTEMPTS} this keeps a whole fetch
+     * shorter than the shortest poll interval (KB section 2.1); changing it means re-checking
+     * that invariant, which {@code RetryBoundInvariantTest} guards.
+     */
+    static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(4);
 
     /** default Retry-After duration when 429 has no header */
     private static final long DEFAULT_RETRY_AFTER_MS = 60_000L;
@@ -55,8 +54,8 @@ final class CdnFetcher {
     private final HttpClient httpClient;
     private final RetryStrategy retryStrategy;
 
-    // mutated only in doFetch(); guarded by fetchLock
-    private CacheState state = CacheState.EMPTY;
+    // mutated in doFetch() under fetchLock; also cleared by invalidateCache() from other threads
+    private volatile CacheState state = CacheState.EMPTY;
 
     // rate limit tracking; read outside the lock by isRateLimited()
     private final AtomicLong rateLimitedUntil = new AtomicLong(0);
@@ -74,6 +73,18 @@ final class CdnFetcher {
         this.retryStrategy = retryStrategy;
     }
 
+    /**
+     * Drops the cached ETag / Last-Modified so the next fetch is unconditional.
+     *
+     * <p>Call this when a fetched body could not be applied. The validators are stored as soon as
+     * a 2xx arrives, before the caller has had a chance to reject the body, so leaving them in
+     * place would make the next fetch revalidate to 304 ("what you have is current") for a config
+     * that was never actually loaded.
+     */
+    void invalidateCache() {
+        state = CacheState.EMPTY;
+    }
+
     /** Returns true if a 429 Retry-After period is still active. */
     boolean isRateLimited() {
         return System.currentTimeMillis() < rateLimitedUntil.get();
@@ -82,25 +93,26 @@ final class CdnFetcher {
     /**
      * Fetches the flag configuration from the CDN with retry.
      *
-     * <p>If currently rate-limited (429), returns a 429 {@link FetchResult} immediately
-     * without making a network request.
+     * <p>Returns {@link FetchResult#skipped()} without making a request when a fetch is already
+     * in flight (KB section 2.1.1) or when inside an active Retry-After window (KB section 2.3).
      *
-     * <p>Uses {@code tryLock} to serialise concurrent callers. The polling worker is single-threaded,
-     * so back-to-back poll invocations are already sequential. The lock guards against concurrent
-     * calls from other paths (e.g. a future SSE-triggered re-fetch on a different thread) racing
-     * the in-progress fetch's {@code state} mutation.
+     * <p>{@link PollingManager} already serialises its own fetches, so the in-flight guard is
+     * defence in depth for callers outside it: {@link DynatraceProvider#initialize} fetches on the
+     * caller's thread. It is what keeps {@link #state} consistent, since a conditional request
+     * reads the validators before sending and stores the new pair after, and interleaving two
+     * fetches could store an ETag and a Last-Modified that came from different responses.
      *
-     * @return {@link FetchResult}; body is null on 304, 429, or on a stale-node response
+     * @return {@link FetchResult}; body is null on 304, 429, a skip, or on a stale-node response
      * @throws IOException on network failure after all retry attempts exhausted
      */
     FetchResult fetch() throws IOException {
         if (isRateLimited()) {
-            log.debug("rate limited; skipping fetch");
-            return new FetchResult(429, null, null, null);
+            log.debug("inside Retry-After window; skipping fetch (no request made)");
+            return FetchResult.skipped();
         }
         if (!fetchLock.tryLock()) {
-            log.debug("fetch already in progress; skipping");
-            return new FetchResult(304, null, null, null);
+            log.debug("fetch already in progress; skipping (no request made)");
+            return FetchResult.skipped();
         }
         try {
             return retryStrategy.execute(this::doFetch);
@@ -111,7 +123,7 @@ final class CdnFetcher {
 
     private FetchResult doFetch() throws IOException {
         CacheState current = state;
-        String currentLastModifiedHeader = toHeaderDate(current.lastModifiedAt);
+        String currentLastModifiedHeader = HttpDates.format(current.lastModifiedAt);
 
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(url)
@@ -154,7 +166,7 @@ final class CdnFetcher {
         if (statusCode >= 200 && statusCode < 300) {
             // stale CDN node defense: reject 200 if Last-Modified isn't newer (CF nodes can serve old).
             // missing Last-Modified: accept (no header = no check).
-            ZonedDateTime newLastModifiedAt = fromHeaderDate(newLastModified);
+            ZonedDateTime newLastModifiedAt = HttpDates.parse(newLastModified);
             if (newLastModifiedAt != null
                     && current.lastModifiedAt != null
                     && !newLastModifiedAt.isAfter(current.lastModifiedAt)) {
@@ -191,23 +203,6 @@ final class CdnFetcher {
         } catch (DateTimeParseException ignored) {
         }
         return DEFAULT_RETRY_AFTER_MS;
-    }
-
-    private static ZonedDateTime fromHeaderDate(String value) {
-        if (value == null) {
-            return null;
-        }
-        try {
-            return ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME);
-        } catch (DateTimeParseException e) {
-            log.warn("unparseable HTTP-date '{}': {}", value, e.getMessage());
-            return null;
-        }
-    }
-
-    /** Formats a {@link ZonedDateTime} as canonical IMF-fixdate (RFC 7231). Null-safe. */
-    private static String toHeaderDate(ZonedDateTime value) {
-        return value == null ? null : HEADER_DATE_FORMATTER.format(value.withZoneSameInstant(ZoneOffset.UTC));
     }
 
     private static final class CacheState {

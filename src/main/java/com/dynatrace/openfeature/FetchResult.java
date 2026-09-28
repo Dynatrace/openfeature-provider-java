@@ -5,8 +5,15 @@ package com.dynatrace.openfeature;
  *
  * <p>{@code body} is null on HTTP 304 (Not Modified); callers should skip updating
  * flagd-core in that case.
+ *
+ * <p>{@link #skipped()} is a distinct outcome from any HTTP status: no request was made.
  */
 final class FetchResult {
+
+    /** Sentinel status for {@link #skipped()}; never a real HTTP status. */
+    private static final int STATUS_SKIPPED = 0;
+
+    private static final FetchResult SKIPPED = new FetchResult(STATUS_SKIPPED, null, null, null);
 
     private final int statusCode;
     private final String body;          // null on 304
@@ -18,6 +25,11 @@ final class FetchResult {
         this.body = body;
         this.etag = etag;
         this.lastModified = lastModified;
+    }
+
+    /** No request was made: a fetch was already in flight, or a Retry-After window is open. */
+    static FetchResult skipped() {
+        return SKIPPED;
     }
 
     int getStatusCode() {
@@ -37,6 +49,10 @@ final class FetchResult {
     /** Last-Modified value (RFC 1123) from response, or null if absent */
     String getLastModified() {
         return lastModified;
+    }
+
+    boolean isSkipped() {
+        return statusCode == STATUS_SKIPPED;
     }
 
     boolean isNotModified() {
