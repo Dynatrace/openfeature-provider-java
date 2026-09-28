@@ -120,6 +120,9 @@ final class MockServer {
             if (r.body != null) {
                 n.put("body", r.body);
             }
+            if (r.delayMs > 0) {
+                n.put("delayMs", r.delayMs);
+            }
             ObjectNode headers = n.putObject("headers");
             r.headers.forEach(headers::put);
         }
@@ -151,7 +154,8 @@ final class MockServer {
                 out.add(new RecordedRequest(
                         req.path("method").asText(),
                         req.path("path").asText(),
-                        headers));
+                        headers,
+                        req.path("receivedAtMs").asLong()));
             }
             return out;
         } catch (IOException e) {
@@ -190,6 +194,7 @@ final class MockServer {
         final int status;
         final String body;                       // null => no body
         final Map<String, String> headers = new LinkedHashMap<>();
+        int delayMs;                             // 0 => answer immediately
 
         private CdnResponse(int status, String body) {
             this.status = status;
@@ -208,6 +213,16 @@ final class MockServer {
             headers.put(name, value);
             return this;
         }
+
+        /**
+         * Holds the response back this long before writing anything. The mock server records the
+         * request at arrival, so a delayed response still shows up in cadence assertions at the
+         * moment the provider issued it, and abandons the delay when the provider disconnects.
+         */
+        CdnResponse delay(Duration delay) {
+            this.delayMs = (int) delay.toMillis();
+            return this;
+        }
     }
 
     /** A CDN request the backend recorded (header names lower-cased). */
@@ -215,11 +230,14 @@ final class MockServer {
         final String method;
         final String path;
         final Map<String, String> headers;
+        /** Unix epoch millis at arrival, stamped before any response delay. */
+        final long receivedAtMs;
 
-        RecordedRequest(String method, String path, Map<String, String> headers) {
+        RecordedRequest(String method, String path, Map<String, String> headers, long receivedAtMs) {
             this.method = method;
             this.path = path;
             this.headers = headers;
+            this.receivedAtMs = receivedAtMs;
         }
 
         boolean hasHeader(String name) {

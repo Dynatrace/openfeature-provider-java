@@ -515,6 +515,11 @@ public final class DynatraceProvider extends EventProvider {
         }
     }
 
+    /** The poll/fetch coordinator, or null before {@link #initialize} has run. */
+    PollingManager pollingManager() {
+        return pollingManager;
+    }
+
     private synchronized boolean cancelSseDisconnectTimer() {
         ScheduledFuture<?> timer = sseDisconnectTimer;
         if (timer == null) {
