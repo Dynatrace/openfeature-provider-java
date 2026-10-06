@@ -68,7 +68,7 @@ final class MockServer {
      * from the spec commit the harness is pinned to. Override with -Dmockserver.image=... or
      * MOCKSERVER_IMAGE=... (e.g. to run a locally built image).
      */
-    private static String defaultImage() {
+    private static String resolveMockServerImage() {
         try (InputStream in = MockServer.class.getResourceAsStream(VERSION_RESOURCE)) {
             if (in == null) {
                 throw new IllegalStateException(
@@ -87,7 +87,7 @@ final class MockServer {
             image = System.getenv("MOCKSERVER_IMAGE");
         }
         if (image == null) {
-            image = defaultImage();
+            image = resolveMockServerImage();
         }
         GenericContainer<?> c = new GenericContainer<>(DockerImageName.parse(image))
                 .withExposedPorts(CONTAINER_PORT)
@@ -102,16 +102,16 @@ final class MockServer {
         return baseUrl;
     }
 
-    /** Clears programmed CDN responses, recorded requests and rate-limit state. */
+    /** Clears cdnResponses CDN responses, recorded requests and rate-limit state. */
     void reset() {
-        send("POST", "/__control__/reset", null);
+        sendControlRequest("POST", "/__control__/reset", null);
     }
 
     /**
-     * Programs the ordered CDN response sequence served at {@code GET /server/*}. Each fetch consumes
+     * Sets the ordered CDN response sequence served at {@code GET /server/*}. Each fetch consumes
      * the next entry; once exhausted the last entry is served repeatedly ({@code repeatLast=true}).
      */
-    void programCdn(List<CdnResponse> responses) {
+    void setCdnResponses(List<CdnResponse> responses) {
         ObjectNode body = MAPPER.createObjectNode();
         ArrayNode arr = body.putArray("responses");
         for (CdnResponse r : responses) {
@@ -127,22 +127,22 @@ final class MockServer {
             r.headers.forEach(headers::put);
         }
         body.put("repeatLast", true);
-        send("PUT", "/__control__/cdn/responses", body.toString());
+        sendControlRequest("PUT", "/__control__/cdn/responses", body.toString());
     }
 
-    /** Convenience: program a single sticky CDN response. */
-    void programCdn(CdnResponse response) {
-        programCdn(List.of(response));
+    /** Sets a single sticky CDN response. */
+    void setCdnResponses(CdnResponse response) {
+        setCdnResponses(List.of(response));
     }
 
     /** Number of CDN requests received since the last {@link #reset()}. */
-    int cdnRequestCount() {
-        return cdnRequests().size();
+    int countCdnRequests() {
+        return fetchCdnRequests().size();
     }
 
     /** CDN requests received since the last {@link #reset()}, in arrival order. */
-    List<RecordedRequest> cdnRequests() {
-        String json = send("GET", "/__control__/cdn/requests", null);
+    List<RecordedRequest> fetchCdnRequests() {
+        String json = sendControlRequest("GET", "/__control__/cdn/requests", null);
         try {
             JsonNode root = MAPPER.readTree(json);
             List<RecordedRequest> out = new ArrayList<>();
@@ -163,7 +163,7 @@ final class MockServer {
         }
     }
 
-    private String send(String method, String path, String jsonBody) {
+    private String sendControlRequest(String method, String path, String jsonBody) {
         HttpRequest.Builder b = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path))
                 .timeout(Duration.ofSeconds(10));
@@ -189,7 +189,7 @@ final class MockServer {
         }
     }
 
-    /** A single programmed CDN response. */
+    /** A single cdnResponses CDN response. */
     static final class CdnResponse {
         final int status;
         final String body;                       // null => no body
@@ -205,11 +205,11 @@ final class MockServer {
             return new CdnResponse(status, body);
         }
 
-        static CdnResponse status(int status) {
+        static CdnResponse of(int status) {
             return new CdnResponse(status, null);
         }
 
-        CdnResponse header(String name, String value) {
+        CdnResponse withHeader(String name, String value) {
             headers.put(name, value);
             return this;
         }
@@ -219,7 +219,7 @@ final class MockServer {
          * request at arrival, so a delayed response still shows up in cadence assertions at the
          * moment the provider issued it, and abandons the delay when the provider disconnects.
          */
-        CdnResponse delay(Duration delay) {
+        CdnResponse withDelay(Duration delay) {
             this.delayMs = (int) delay.toMillis();
             return this;
         }
@@ -244,7 +244,7 @@ final class MockServer {
             return headers.containsKey(name.toLowerCase());
         }
 
-        String header(String name) {
+        String getHeader(String name) {
             return headers.get(name.toLowerCase());
         }
     }
