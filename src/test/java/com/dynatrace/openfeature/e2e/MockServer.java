@@ -29,6 +29,9 @@ import java.util.Map;
  */
 final class MockServer {
 
+    /** The only path the mock server serves an SSE stream on. */
+    static final String SSE_PATH = "/sse";
+
     /** Port the mock server listens on inside the container. */
     private static final int CONTAINER_PORT = 8080;
 
@@ -161,6 +164,37 @@ final class MockServer {
         } catch (IOException e) {
             throw new IllegalStateException("failed to parse recorded CDN requests: " + json, e);
         }
+    }
+
+    /** Number of SSE subscribers currently connected */
+    int sseClientCount() {
+        String json = sendControlRequest("GET", "/__control__/sse/clients", null);
+        try {
+            return MAPPER.readTree(json).path("clients").asInt();
+        } catch (IOException e) {
+            throw new IllegalStateException("failed to parse SSE client count: " + json, e);
+        }
+    }
+
+    /** Drops all SSE subscriber and refuses new connections until {@link #restoreSse()} or {@link #reset()} */
+    void dropSse() {
+        sendControlRequest("POST", "/__control__/sse/disconnect", null);
+    }
+
+    /** Drops every connected SSE subscriber and refuses new connections for {@code outage} seconds. */
+    void dropSse(Duration outage) {
+        sendControlRequest("POST", "/__control__/sse/disconnect",
+                "{\"reconnectSeconds\":" + (outage.toMillis() / 1000.0) + "}");
+    }
+
+    /** Ends an outage opened by {@link #dropSse()} so the next reconnect attempt succeeds. */
+    void restoreSse() {
+        sendControlRequest("POST", "/__control__/sse/disconnect", "{\"reconnectSeconds\":0}");
+    }
+
+    /** Broadcasts {@code payload} as the {@code data:} line of an SSE event to every connected subscriber */
+    void emitSse(String payload) {
+        sendControlRequest("POST", "/__control__/sse/emit", payload);
     }
 
     private String sendControlRequest(String method, String path, String jsonBody) {

@@ -5,10 +5,14 @@ import com.dynatrace.openfeature.DynatraceProviderOptions;
 import com.dynatrace.openfeature.ProviderTestSupport;
 import com.dynatrace.openfeature.e2e.MockServer.CdnResponse;
 import com.dynatrace.openfeature.e2e.MockServer.RecordedRequest;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.openfeature.sdk.Client;
 import dev.openfeature.sdk.ErrorCode;
+import dev.openfeature.sdk.EventDetails;
 import dev.openfeature.sdk.FlagEvaluationDetails;
 import dev.openfeature.sdk.OpenFeatureAPI;
+import dev.openfeature.sdk.ProviderEvent;
 import dev.openfeature.sdk.ProviderState;
 import io.cucumber.java.After;
 import io.cucumber.java.Before;
@@ -18,10 +22,12 @@ import io.cucumber.java.en.When;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
@@ -30,7 +36,7 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Step definitions for the CDN gherkin spec ({@code gherkin/cdn.feature}).
+ * Step definitions for the shared gherkin specs ({@code gherkin/}).
  *
  * <p>Black-box: the provider is embedded in an OpenFeature SDK instance rather than driven
  * directly. Each scenario binds a fresh {@link DynatraceProvider} to its own OpenFeature
@@ -38,70 +44,74 @@ import static org.junit.jupiter.api.Assertions.*;
  * that SDK surface: flags are read with an OpenFeature {@link Client} and readiness is read from
  * {@link Client#getProviderState()} (fed by the provider's OpenFeature events). Every component the
  * provider talks to is emulated by the containerized {@link MockServer}, configured via its HTTP control API.
+ * SSE connectivity and poll cadence are asserted via the mock server's subscriber count and CDN
+ * request log.
  */
-public class CdnStepDefinitions {
+public class E2eStepDefinitions {
 
     private static final String BASE_KEY =
             "dt01.server_us_abcdef1234.de848e97a9cc4cc78aae568e65f49a9d_a1b2c3d4e5";
 
-    /** Read from the provider, so scenarios assert against the real cadence rather than a copy. */
-    private static final Duration POLL_INTERVAL = ProviderTestSupport.pollInterval();
-    /** Bound on one CDN attempt (KB section 2.1). */
+    /** The provider's real cadence; SSE is off in the CDN spec. */
+    private static final Duration POLL_INTERVAL = ProviderTestSupport.SSE_DISCONNECTED_POLL_INTERVAL;
+    /** Bound on one CDN attempt. */
     private static final Duration REQUEST_TIMEOUT = ProviderTestSupport.requestTimeout();
 
     /** Longer than the poll cadence, so a refresh is observed. */
     private static final Duration POLL_TIMEOUT = POLL_INTERVAL.plusSeconds(1);
-    /** Considers time taken by all retries for 5xx codes */
+    /** Covers all retries for 5xx codes. */
     private static final Duration RETRY_TIMEOUT = Duration.ofSeconds(2);
-    /** Window over which a "continues to" assertion must keep holding. */
+    /** How long a "continues to" assertion must keep holding. */
     private static final Duration STABLE_WINDOW = Duration.ofSeconds(2);
-    /** Window over which a state assertion may take to arrive, since state rides OpenFeature events. */
-    private static final Duration STATE_TIMEOUT = Duration.ofSeconds(2);
-
-    /** Slack added when sleeping to a tick boundary, so the tick has fired by the time we look. */
+    /** Slack for something the step just caused, and the window for asserting its absence. */
+    private static final Duration SETTLE = Duration.ofSeconds(2);
+    /** How long to wait for a provider event the step just caused. */
+    private static final Duration EVENT_TIMEOUT = Duration.ofSeconds(5);
+    /** How long to wait for the provider to open its SSE stream. */
+    private static final Duration SSE_CONNECT_TIMEOUT = Duration.ofSeconds(5);
+    /** Generous, since the event source's reconnect backoff grows with each failed attempt. */
+    private static final Duration SSE_RECONNECT_TIMEOUT = Duration.ofSeconds(45);
+    /** Placeholder for the mock server's authority in a spec'd URL. */
+    private static final String MOCK_SERVER_PLACEHOLDER = "<mockserver>";
+    /** Slack past a tick boundary, so the tick has fired by the time we look. */
     private static final Duration TICK_MARGIN = Duration.ofMillis(500);
-    /** Cap on waiting for expected requests to arrive; a fetch is at most two bounded attempts. */
+    /** Cap on waiting for expected requests; a fetch is at most two bounded attempts. */
     private static final Duration COUNT_TIMEOUT = REQUEST_TIMEOUT.multipliedBy(3);
-    /** How long an exact request count must keep holding, so a stray extra request still fails. */
+    /** How long an exact request count must keep holding. */
     private static final Duration COUNT_SETTLE = Duration.ofSeconds(1);
-    /**
-     * Tolerance on a measured interval. Wide enough for CI scheduling jitter, narrow enough that a
-     * cadence anchored to the wrong moment (request completion, or initialization start) fails.
-     */
+    /** Tolerance on a measured interval: absorbs CI jitter, still catches a wrongly anchored cadence. */
     private static final Duration CADENCE_TOLERANCE = Duration.ofMillis(1500);
-    /**
-     * Requests closer together than this belong to the same poll tick: a tick that retries issues
-     * its second attempt one request timeout later, which is well inside half a poll interval.
-     */
+    /** Requests closer together than this belong to the same poll tick (i.e. are retries). */
     private static final long SAME_TICK_GAP_MS = POLL_INTERVAL.toMillis() / 2;
-    /** How far before a tick an SSE re-fetch is triggered, so it is still in flight when the tick fires. */
+    /** How far before a tick an SSE re-fetch is triggered, so it is still in flight then. */
     private static final Duration SHORTLY_BEFORE = Duration.ofMillis(500);
 
-    /** Gives every scenario a unique OpenFeature domain so providers never leak across scenarios. */
+    /** Gives every scenario a unique OpenFeature domain. */
     private static final AtomicInteger SCENARIO_SEQ = new AtomicInteger();
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final OpenFeatureAPI api = OpenFeatureAPI.getInstance();
+
+    /** Provider events seen on this scenario's client, in arrival order. */
+    private final List<RecordedEvent> events = Collections.synchronizedList(new ArrayList<>());
+    /** Index into {@link #events}; each "a PROVIDER_* event is emitted" step consumes one. */
+    private int eventCursor;
 
     private String domain;
     private Client client;
 
     private String sdkKey;
-    private DynatraceProviderOptions options;
+    private DynatraceProviderOptions.Builder optionsBuilder;
+    private boolean sseEnabled;
     private MockServer mockServer;
 
     private DynatraceProvider provider;
     private Exception initError;
 
-    /**
-     * Baseline for "further request" counts. Set when the provider is arranged, and again by every
-     * step that advances the clock, so each count reads as "since the last thing that happened".
-     */
+    /** Baseline for "further request" counts; reset by arrangement and every clock-advancing step. */
     private int countBaseline;
-
-    /**
-     * When initialization returned, success or failure. The polling timer starts there (KB section
-     * 3.1 step 4), so it is also the anchor every tick boundary is derived from.
-     */
+    /** When initialization returned; the anchor every poll tick boundary is derived from. */
     private long pollingStartedAtMs;
 
     /** The CDN responses currently set on the mock, so a delay can be layered onto them. */
@@ -115,8 +125,15 @@ public class CdnStepDefinitions {
         // A per-scenario domain isolates this scenario's provider on the shared OpenFeature API.
         domain = "e2e-test-" + SCENARIO_SEQ.incrementAndGet();
         client = api.getClient(domain);
+        for (ProviderEvent event : ProviderEvent.values()) {
+            client.on(event, details -> events.add(new RecordedEvent(event, details)));
+        }
         if (MockServer.isRunning()) {
-            MockServer.get().reset();
+            MockServer server = MockServer.get();
+            server.reset();
+            // reset() clears the SSE outage gate but not a stream the previous scenario's provider
+            // is still tearing down; wait it out so "opens no SSE connection" sees a clean slate.
+            pollUntil(SETTLE, () -> server.sseClientCount() == 0);
         }
         countBaseline = 0;
         cdnResponses = List.of();
@@ -136,7 +153,12 @@ public class CdnStepDefinitions {
 
     @Given("a mock server is running")
     public void aMockServerIsRunning() {
-        useMockServer();
+        useMockServer(false);
+    }
+
+    @Given("a mock server with SSE enabled is running")
+    public void aMockServerWithSseEnabledIsRunning() {
+        useMockServer(true);
     }
 
     @Given("the SDK key {string}")
@@ -144,9 +166,20 @@ public class CdnStepDefinitions {
         sdkKey = key;
     }
 
+    @Given("SSE is disabled by configuration")
+    public void sseIsDisabledByConfiguration() {
+        optionsBuilder.disableSse();
+        sseEnabled = false;
+    }
+
     @Given("the CDN serves the {string} flag configuration")
     public void theCdnServesTheFlagConfiguration(String flagFileName) {
         setCdnResponses(CdnResponse.of(200, loadFlagConfig(flagFileName)));
+    }
+
+    @Given("the CDN serves the {string} flag configuration advertising an SSE stream at url {string}")
+    public void theCdnServesTheFlagConfigurationAdvertisingAnSseStreamAtUrl(String flagFileName, String url) {
+        setCdnResponses(CdnResponse.of(200, advertisingSseUrl(loadFlagConfig(flagFileName), url)));
     }
 
     // header and value are null when the step has no "with ... header ..." suffix
@@ -157,6 +190,7 @@ public class CdnStepDefinitions {
         setCdnResponses(header == null ? response : response.withHeader(header, value));
         registerProviderWithSdk();
         assertEquals(ProviderState.READY, client.getProviderState());
+        awaitSseSettled();
         markArranged();
     }
 
@@ -220,8 +254,66 @@ public class CdnStepDefinitions {
 
     @When("polling triggers a configuration refetch")
     public void pollingTriggersAConfigurationRefetch() {
+        awaitCdnRequestWithin(POLL_TIMEOUT);
+    }
+
+    @When("polling triggers a configuration refetch after the SSE_DISCONNECTED_POLL_INTERVAL")
+    public void pollingTriggersAConfigurationRefetchAfterTheSseDisconnectedPollInterval() {
+        awaitCdnRequestWithin(ProviderTestSupport.SSE_DISCONNECTED_POLL_INTERVAL);
+    }
+
+    @When("polling triggers a configuration refetch after the SSE_CONNECTED_POLL_INTERVAL")
+    public void pollingTriggersAConfigurationRefetchAfterTheSseConnectedPollInterval() {
+        awaitCdnRequestWithin(ProviderTestSupport.SSE_CONNECTED_POLL_INTERVAL);
+    }
+
+    /**
+     * A blip: the backend drops the stream and refuses connections for {@code outageSeconds}, then accepts them again.
+     */
+    @When("the SSE stream drops for {int} seconds and reconnects within the DISCONNECT_DEBOUNCE_TIME_WINDOW")
+    public void theSseStreamDropsForSecondsAndReconnectsWithinTheDebounceWindow(int outageSeconds) {
+        Duration debounce = ProviderTestSupport.DISCONNECT_DEBOUNCE_TIME_WINDOW;
+        mockServer.dropSse(Duration.ofSeconds(outageSeconds));
+        assertTrue(pollUntil(debounce, () -> mockServer.sseClientCount() >= 1),
+                "SSE did not reconnect within the " + debounce.toSeconds() + "s disconnect debounce window");
+    }
+
+    /**
+     * A sustained outage: connections stay refused until the stream is restored or reset.
+     */
+    @When("the SSE stream drops and stays down past the DISCONNECT_DEBOUNCE_TIME_WINDOW")
+    public void theSseStreamDropsAndStaysDownPastTheDebounceWindow() {
+        mockServer.dropSse();
+        // Hand the provider its debounce window (plus slack) to escalate the fault to a disconnect;
+        // the following Then steps assert what that escalation did.
+        pollUntil(ProviderTestSupport.DISCONNECT_DEBOUNCE_TIME_WINDOW.plus(SETTLE),
+                () -> client.getProviderState() != ProviderState.READY);
+    }
+
+    @When("the SSE stream reconnects")
+    public void theSseStreamReconnects() {
+        mockServer.restoreSse();
+        assertTrue(pollUntil(SSE_RECONNECT_TIMEOUT, () -> mockServer.sseClientCount() >= 1),
+                "SSE did not reconnect after the outage was lifted");
+    }
+
+    @When("^the server emits an SSE message (.*)$")
+    public void theServerEmitsAnSseMessage(String rawPayload) {
+        String payload = unquote(rawPayload);
         int baseline = mockServer.countCdnRequests();
-        waitFor(POLL_TIMEOUT, () -> mockServer.countCdnRequests() > baseline);
+        mockServer.emitSse(payload);
+        // essentially a sleep but stop earlier if received message has triggered cdn request
+        pollUntil(SETTLE, () -> mockServer.countCdnRequests() > baseline);
+    }
+
+    @When("the grace period expires")
+    public void theGracePeriodExpires() {
+        pollUntil(ProviderTestSupport.GRACE_PERIOD.plus(SETTLE), () -> client.getProviderState() == ProviderState.ERROR);
+    }
+
+    @When("the provider is shut down")
+    public void theProviderIsShutDown() {
+        api.shutdown();
     }
 
     /** Baseline is taken before sleeping, so the next assertion counts what these intervals produced. */
@@ -276,8 +368,79 @@ public class CdnStepDefinitions {
         // Provider state reaches the client over an OpenFeature event, so allow it a moment to
         // land; a state that is already correct passes on the first check.
         ProviderState want = ProviderState.valueOf(state);
-        waitFor(STATE_TIMEOUT, () -> client.getProviderState() == want);
+        waitFor(SETTLE, () -> client.getProviderState() == want);
         assertEquals(want, client.getProviderState());
+    }
+
+    @Then("a {word} event is emitted")
+    public void aProviderEventIsEmitted(String eventName) {
+        consumeEvent(ProviderEvent.valueOf(eventName));
+    }
+
+    @Then("a PROVIDER_CONFIGURATION_CHANGED event is emitted with changed flag {string}")
+    public void aConfigurationChangedEventIsEmittedWithChangedFlag(String flag) {
+        EventDetails details = consumeEvent(ProviderEvent.PROVIDER_CONFIGURATION_CHANGED);
+        List<String> changed = details.getFlagsChanged();
+        assertNotNull(changed, "PROVIDER_CONFIGURATION_CHANGED carried no changed flags");
+        assertTrue(changed.contains(flag),
+                "PROVIDER_CONFIGURATION_CHANGED changed flags " + changed + " do not include " + flag);
+    }
+
+    @Then("the provider has an SSE connection to {string}")
+    public void theProviderHasAnSseConnectionTo(String path) {
+        // The backend serves a single stream path, so a live subscriber is a stream to that path.
+        assertEquals(MockServer.SSE_PATH, path,
+                "the mock server only serves an SSE stream at " + MockServer.SSE_PATH);
+        assertTrue(pollUntil(SSE_CONNECT_TIMEOUT, () -> mockServer.sseClientCount() == 1),
+                "provider did not open an SSE connection to " + path);
+    }
+
+    @Then("the provider opens no SSE connection")
+    public void theProviderOpensNoSseConnection() {
+        // Hold the assertion: a connection attempt in flight must not be mistaken for none at all.
+        assertHoldsFor(SETTLE, () -> mockServer.sseClientCount() == 0,
+                "provider unexpectedly opened an SSE connection");
+    }
+
+    @Then("the provider closes the SSE connection")
+    public void theProviderClosesTheSseConnection() {
+        assertTrue(pollUntil(SETTLE, () -> mockServer.sseClientCount() == 0),
+                "provider did not close the SSE connection");
+    }
+
+    @Then("a message after shutdown triggers no CDN request")
+    public void aMessageAfterShutdownTriggersNoCdnRequest() {
+        int baseline = mockServer.countCdnRequests();
+        mockServer.emitSse("{\"type\":\"refetchConfig\",\"lastModified\":1704153600}");
+        sleep(STABLE_WINDOW);
+        assertEquals(baseline, mockServer.countCdnRequests(),
+                "a shut-down provider still re-fetched on an SSE message");
+    }
+
+    /**
+     * The cadence itself isn't observable black-box, so it is asserted by its consequence: with SSE
+     * connected no fetch may arrive for longer than the aggressive cadence would allow.
+     */
+    @Then("the active poll interval is the SSE_CONNECTED_POLL_INTERVAL")
+    public void theActivePollIntervalIsTheSseConnectedInterval() {
+        Duration interval = ProviderTestSupport.SSE_CONNECTED_POLL_INTERVAL;
+        assertTrue(POLL_TIMEOUT.compareTo(interval) < 0,
+                "observation window must be shorter than the " + interval.toSeconds() + "s interval under test");
+        // The connect catch-up fetch must be in before the baseline, or it lands mid-observation.
+        awaitSseSettled();
+        int baseline = mockServer.countCdnRequests();
+        sleep(POLL_TIMEOUT);
+        assertEquals(baseline, mockServer.countCdnRequests(),
+                "provider kept fetching within " + POLL_TIMEOUT.toSeconds()
+                        + "s, so polling did not relax to the " + interval.toSeconds() + "s interval");
+    }
+
+    /**
+     * Asserted by its consequence too: a fetch must arrive within the aggressive cadence.
+     */
+    @Then("the active poll interval is the SSE_DISCONNECTED_POLL_INTERVAL")
+    public void theActivePollIntervalIsTheSseDisconnectedInterval() {
+        awaitCdnRequestWithin(ProviderTestSupport.SSE_DISCONNECTED_POLL_INTERVAL);
     }
 
     @Then("the initial CDN request has no {string} header")
@@ -293,6 +456,15 @@ public class CdnStepDefinitions {
                 index + ". CDN request missing expected header: " + header);
         assertEquals(value, request.getHeader(header),
                 index + ". CDN request " + header + " header mismatch");
+    }
+
+    @Then("the CDN received {int} requests")
+    public void theCdnReceivedRequests(int count) {
+        // A fetch the provider was told to make (SSE connect, SSE message, poll) is in flight by the
+        // time this step runs, so wait for the expected count before insisting on it.
+        pollUntil(SETTLE, () -> mockServer.countCdnRequests() >= count);
+        assertEquals(count, mockServer.countCdnRequests(),
+                "expected " + count + " CDN requests, saw " + mockServer.countCdnRequests());
     }
 
     /**
@@ -437,18 +609,34 @@ public class CdnStepDefinitions {
                         + CADENCE_TOLERANCE.toMillis() + "ms");
     }
 
-    private void useMockServer() {
+    private void useMockServer(boolean sseEnabled) {
         if (mockServer == null) {
             mockServer = MockServer.get();
         }
-        if (provider == null && options == null) {
-            options = DynatraceProviderOptions.builder()
-                    .configOrigin(mockServer.origin())
-                    .metricsOrigin(mockServer.origin())
-                    .metricsFlushInterval(Duration.ofHours(1)) // no periodic metrics flush during a scenario
-                    .disableSse()                              // this spec drives refreshes via polling
-                    .build();
+        optionsBuilder = DynatraceProviderOptions.builder()
+                .configOrigin(mockServer.origin())
+                .metricsOrigin(mockServer.origin())
+                .metricsFlushInterval(Duration.ofHours(1)); // no periodic metrics flush during a scenario
+        this.sseEnabled = sseEnabled;
+        if (!sseEnabled) {
+            optionsBuilder.disableSse();
         }
+    }
+
+    /**
+     * Waits for the SSE stream and the catch-up fetch a successful connect pulls, so a scenario
+     * that starts from a READY provider never races the stream it is about to drop or message.
+     * No-op when SSE is off for the scenario, as it is throughout the CDN spec.
+     */
+    private void awaitSseSettled() {
+        if (!sseEnabled) {
+            return;
+        }
+        assertTrue(pollUntil(SSE_CONNECT_TIMEOUT, () -> mockServer.sseClientCount() >= 1),
+                "provider did not open its SSE stream");
+        // Fetch 1 comes from initialize, fetch 2 from the successful connect.
+        assertTrue(pollUntil(SETTLE, () -> mockServer.countCdnRequests() >= 2),
+                "SSE connected but pulled no catch-up fetch");
     }
 
     /**
@@ -457,8 +645,85 @@ public class CdnStepDefinitions {
      * READY, throwing an {@code OpenFeatureError} if initialization fails.
      */
     private void registerProviderWithSdk() {
-        provider = new DynatraceProvider(sdkKey, options);
+        provider = ProviderTestSupport.createProvider(sdkKey, optionsBuilder.build());
         api.setProviderAndWait(domain, provider);
+    }
+
+    /** Rewrites a flag configuration fixture to advertise a direct SSE {@code url} */
+    private String advertisingSseUrl(String configJson, String url) {
+        String resolved = url.replace(MOCK_SERVER_PLACEHOLDER,
+                URI.create(mockServer.origin()).getAuthority());
+        try {
+            ObjectNode root = (ObjectNode) MAPPER.readTree(configJson);
+            ObjectNode stream = MAPPER.createObjectNode().put("type", "sse").put("url", resolved);
+            root.set("eventStreams", MAPPER.createArrayNode().add(stream));
+            return root.toString();
+        } catch (IOException e) {
+            throw new UncheckedIOException("could not rewrite flag config to advertise " + resolved, e);
+        }
+    }
+
+    /** Waits for a fetch to arrive within {@code interval} (plus slack for scheduling jitter). */
+    private void awaitCdnRequestWithin(Duration interval) {
+        int baseline = mockServer.countCdnRequests();
+        waitFor(interval, () -> mockServer.countCdnRequests() > baseline);
+    }
+
+    /**
+     * Returns the next captured event of type {@code expected}, advancing the cursor past it so
+     * repeated steps (e.g. READY at startup and READY again after recovery) consume distinct events.
+     */
+    private EventDetails consumeEvent(ProviderEvent expected) {
+        long deadline = System.currentTimeMillis() + EVENT_TIMEOUT.toMillis();
+        while (true) {
+            synchronized (events) {
+                for (int i = eventCursor; i < events.size(); i++) {
+                    RecordedEvent recorded = events.get(i);
+                    if (recorded.event == expected) {
+                        eventCursor = i + 1;
+                        return recorded.details;
+                    }
+                }
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                fail("no " + expected + " event emitted within " + EVENT_TIMEOUT.toSeconds()
+                        + "s; saw " + eventNames());
+                return null; // unreachable
+            }
+            sleep(Duration.ofMillis(100));
+        }
+    }
+
+    private List<String> eventNames() {
+        List<String> names = new ArrayList<>();
+        synchronized (events) {
+            for (int i = eventCursor; i < events.size(); i++) {
+                names.add(events.get(i).event.name());
+            }
+        }
+        return names;
+    }
+
+    /** Strips one matching pair of surrounding single or double quotes, if present. */
+    private static String unquote(String value) {
+        String trimmed = value.strip();
+        if (trimmed.length() >= 2
+                && (trimmed.startsWith("\"") && trimmed.endsWith("\"")
+                || trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+            return trimmed.substring(1, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    /** A provider event captured from this scenario's client event bus. */
+    private static final class RecordedEvent {
+        final ProviderEvent event;
+        final EventDetails details;
+
+        RecordedEvent(ProviderEvent event, EventDetails details) {
+            this.event = event;
+            this.details = details;
+        }
     }
 
     private RecordedRequest getFirstCdnRequest() {
@@ -495,15 +760,21 @@ public class CdnStepDefinitions {
         }
     }
 
-    private static void waitFor(Duration timeout, BooleanSupplier condition) {
+    /** Polls {@code condition} until it holds or {@code timeout} elapses; reports whether it held. */
+    private static boolean pollUntil(Duration timeout, BooleanSupplier condition) {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadline) {
             if (condition.getAsBoolean()) {
-                return;
+                return true;
             }
             sleep(Duration.ofMillis(100));
         }
-        assertTrue(condition.getAsBoolean(), "condition not met within " + timeout.toSeconds() + "s");
+        return condition.getAsBoolean();
+    }
+
+    /** Waits for {@code condition} to hold, failing the scenario if {@code timeout} elapses first. */
+    private static void waitFor(Duration timeout, BooleanSupplier condition) {
+        assertTrue(pollUntil(timeout, condition), "condition not met within " + timeout.toSeconds() + "s");
     }
 
     private static void assertHoldsFor(Duration duration, BooleanSupplier condition, String message) {
