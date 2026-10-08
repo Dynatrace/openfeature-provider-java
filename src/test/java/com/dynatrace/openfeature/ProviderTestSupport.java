@@ -3,7 +3,7 @@ package com.dynatrace.openfeature;
 import java.time.Duration;
 
 /**
- * The package-private seam the black-box acceptance suite in {@code com.dynatrace.openfeature.e2e}
+ * The package-private seam the black-box e2e suite in {@code com.dynatrace.openfeature.e2e}
  * needs. Everything else it does goes through the OpenFeature SDK and the mock server.
  */
 public final class ProviderTestSupport {

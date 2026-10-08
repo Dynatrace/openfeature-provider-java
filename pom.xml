@@ -259,7 +259,7 @@
                             <argLine>-Dnet.bytebuddy.experimental=true</argLine>
                             <excludes combine.self="override"/>
                             <includes>
-                                <include>**/e2e/RunCdnAcceptanceTest.java</include>
+                                <include>**/e2e/RunCdnE2ETest.java</include>
                             </includes>
                         </configuration>
                     </plugin>

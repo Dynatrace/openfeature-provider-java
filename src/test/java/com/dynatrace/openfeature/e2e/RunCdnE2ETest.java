@@ -26,5 +26,5 @@ import static io.cucumber.junit.platform.engine.Constants.PLUGIN_PROPERTY_NAME;
 // Exclude scenarios by Gherkin tag with a Cucumber tag expression. Overridable on the command line
 // via -Dcucumber.filter.tags="..." (e.g. "not (@polling or @rate-limit)").
 // @ConfigurationParameter(key = FILTER_TAGS_PROPERTY_NAME, value = "not @polling")
-public class RunCdnAcceptanceTest {
+public class RunCdnE2ETest {
 }

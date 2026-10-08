@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code domain} via {@link OpenFeatureAPI#setProviderAndWait}, and every observation goes through
  * that SDK surface: flags are read with an OpenFeature {@link Client} and readiness is read from
  * {@link Client#getProviderState()} (fed by the provider's OpenFeature events). Every component the
- * provider talks to is emulated by the containerized {@link MockServer}, programmed via its HTTP control API.
+ * provider talks to is emulated by the containerized {@link MockServer}, configured via its HTTP control API.
  */
 public class CdnStepDefinitions {
 
@@ -104,13 +104,11 @@ public class CdnStepDefinitions {
      */
     private long pollingStartedAtMs;
 
-    /** The CDN response sequence currently programmed, so a delay can be layered onto it. */
-    private List<CdnResponse> programmed = List.of();
+    /** The CDN responses currently set on the mock, so a delay can be layered onto them. */
+    private List<CdnResponse> cdnResponses = List.of();
 
-    /** The Retry-After the CDN was programmed with, so a scenario can wait that window out. */
+    /** The Retry-After the CDN was set up with, so a scenario can wait that window out. */
     private Duration retryAfter = Duration.ZERO;
-
-    // ---- lifecycle -------------------------------------------------------
 
     @Before
     public void setUp() {
@@ -121,7 +119,7 @@ public class CdnStepDefinitions {
             MockServer.get().reset();
         }
         countBaseline = 0;
-        programmed = List.of();
+        cdnResponses = List.of();
         retryAfter = Duration.ZERO;
     }
 
@@ -148,22 +146,15 @@ public class CdnStepDefinitions {
 
     @Given("the CDN serves the {string} flag configuration")
     public void theCdnServesTheFlagConfiguration(String flagFileName) {
-        program(CdnResponse.of(200, config(flagFileName)));
+        setCdnResponses(CdnResponse.of(200, loadFlagConfig(flagFileName)));
     }
 
-    @Given("an initialized, READY provider serving the {string} flag configuration")
-    public void anInitializedReadyProviderServingTheFlagConfiguration(String flagFileName) {
+    // header and value are null when the step has no "with ... header ..." suffix
+    @Given("^an initialized, READY provider serving the \"([^\"]*)\" flag configuration(?: with \"([^\"]*)\" header \"([^\"]*)\")?$")
+    public void anInitializedReadyProviderServingTheFlagConfiguration(String flagFileName, String header, String value) {
         sdkKey = BASE_KEY;
-        program(CdnResponse.of(200, config(flagFileName)));
-        registerProviderWithSdk();
-        assertEquals(ProviderState.READY, client.getProviderState());
-        markArranged();
-    }
-
-    @Given("an initialized, READY provider serving the {string} flag configuration with {string} header {string}")
-    public void anInitializedReadyProviderServingTheFlagConfigurationWithHeader(String flagFileName, String header, String value) {
-        sdkKey = BASE_KEY;
-        program(CdnResponse.of(200, config(flagFileName)).header(header, value));
+        CdnResponse response = CdnResponse.of(200, loadFlagConfig(flagFileName));
+        setCdnResponses(header == null ? response : response.withHeader(header, value));
         registerProviderWithSdk();
         assertEquals(ProviderState.READY, client.getProviderState());
         markArranged();
@@ -172,13 +163,13 @@ public class CdnStepDefinitions {
     /** Outlives a whole fetch (two attempts, each abandoned at the timeout), so it spans a tick. */
     @Given("the CDN responds slower than the request timeout")
     public void theCdnRespondsSlowerThanTheRequestTimeout() {
-        delayProgrammedResponses(REQUEST_TIMEOUT.multipliedBy(4));
+        delayCdnResponses(REQUEST_TIMEOUT.multipliedBy(4));
     }
 
     /** Takes real time without timing out, so fetch start and fetch end are far enough apart to tell apart. */
     @Given("the CDN responds slowly but within the request timeout")
     public void theCdnRespondsSlowlyButWithinTheRequestTimeout() {
-        delayProgrammedResponses(REQUEST_TIMEOUT.minusSeconds(1));
+        delayCdnResponses(REQUEST_TIMEOUT.minusSeconds(1));
     }
 
     // WHEN
@@ -198,50 +189,46 @@ public class CdnStepDefinitions {
 
     @When("the CDN responds with status {int}")
     public void theCdnRespondsWithStatus(int status) {
-        program(CdnResponse.status(status));
+        setCdnResponses(CdnResponse.of(status));
     }
 
-    @When("the CDN responds with status {int} and body {string}")
+    // unquoted null is an absent body, as opposed to the empty-string body ""
+    @When("^the CDN responds with status (\\d+) and body (\"[^\"]*\"|null)$")
     public void theCdnRespondsWithStatusAndBody(int status, String body) {
-        program(CdnResponse.of(status, body));
-    }
-
-    // Unquoted "null" in the outline denotes an absent body (no body at all), as opposed to the
-    // empty-string body "": {string} only matches quoted values, so this needs its own step.
-    @When("the CDN responds with status {int} and body null")
-    public void theCdnRespondsWithStatusAndBodyNull(int status) {
-        program(CdnResponse.status(status));
+        setCdnResponses("null".equals(body)
+                ? CdnResponse.of(status)
+                : CdnResponse.of(status, body.substring(1, body.length() - 1)));
     }
 
     @When("the CDN responds with status {int} and the {string} flag configuration with {string} header {string}")
     public void theCdnRespondsWithStatusAndTheFlagConfigurationWithHeader(int status, String flagFileName, String header, String value) {
-        program(CdnResponse.of(status, config(flagFileName)).header(header, value));
+        setCdnResponses(CdnResponse.of(status, loadFlagConfig(flagFileName)).withHeader(header, value));
     }
 
     @When("the CDN responds {int} then {int} with the {string} configuration")
     public void theCdnRespondsThenWithTheConfiguration(int first, int second, String flagFileName) {
-        program(List.of(
-                CdnResponse.status(first),
-                CdnResponse.of(second, config(flagFileName))));
+        setCdnResponses(List.of(
+                CdnResponse.of(first),
+                CdnResponse.of(second, loadFlagConfig(flagFileName))));
     }
 
     @When("the CDN responds with status {int} and Retry-After {int} seconds")
     public void theCdnRespondsWithStatusAndRetryAfterSeconds(int status, int seconds) {
         retryAfter = Duration.ofSeconds(seconds);
-        program(CdnResponse.status(status).header("Retry-After", String.valueOf(seconds)));
+        setCdnResponses(CdnResponse.of(status).withHeader("Retry-After", String.valueOf(seconds)));
     }
 
     @When("polling triggers a configuration refetch")
     public void pollingTriggersAConfigurationRefetch() {
-        int baseline = mockServer.cdnRequestCount();
-        await(POLL_TIMEOUT, () -> mockServer.cdnRequestCount() > baseline);
+        int baseline = mockServer.countCdnRequests();
+        waitFor(POLL_TIMEOUT, () -> mockServer.countCdnRequests() > baseline);
     }
 
     /** Baseline is taken before sleeping, so the next assertion counts what these intervals produced. */
     @When("{int} poll interval(s) elapse(s)")
     public void pollIntervalsElapse(int intervals) {
         resetCountBaseline();
-        sleepUntil(nextTickAtMs() + (intervals - 1) * POLL_INTERVAL.toMillis() + TICK_MARGIN.toMillis());
+        sleepUntil(computeNextTickAtMs() + (intervals - 1) * POLL_INTERVAL.toMillis() + TICK_MARGIN.toMillis());
     }
 
     /**
@@ -251,7 +238,7 @@ public class CdnStepDefinitions {
     @When("the next poll tick arrives")
     public void theNextPollTickArrives() {
         resetCountBaseline();
-        sleepUntil(nextTickAtMs() + TICK_MARGIN.toMillis());
+        sleepUntil(computeNextTickAtMs() + TICK_MARGIN.toMillis());
     }
 
     @When("the Retry-After window expires")
@@ -263,13 +250,13 @@ public class CdnStepDefinitions {
     /** Occupies the fetch slot just before a tick, so the tick has something to contend with. */
     @When("an SSE re-fetch is triggered shortly before the next poll tick")
     public void anSseRefetchIsTriggeredShortlyBeforeTheNextPollTick() {
-        sleepUntil(nextTickAtMs() - SHORTLY_BEFORE.toMillis());
-        int before = mockServer.cdnRequestCount();
+        sleepUntil(computeNextTickAtMs() - SHORTLY_BEFORE.toMillis());
+        int before = mockServer.countCdnRequests();
         ProviderTestSupport.triggerSseRefetch(provider, null);
         // The re-fetch runs on the polling worker, so wait for its request to actually reach the
         // CDN. Otherwise it lands after the next step takes its baseline and is miscounted as a
         // request the contended tick made.
-        await(SHORTLY_BEFORE, () -> mockServer.cdnRequestCount() > before);
+        waitFor(SHORTLY_BEFORE, () -> mockServer.countCdnRequests() > before);
     }
 
     // THEN
@@ -289,22 +276,22 @@ public class CdnStepDefinitions {
         // Provider state reaches the client over an OpenFeature event, so allow it a moment to
         // land; a state that is already correct passes on the first check.
         ProviderState want = ProviderState.valueOf(state);
-        await(STATE_TIMEOUT, () -> client.getProviderState() == want);
+        waitFor(STATE_TIMEOUT, () -> client.getProviderState() == want);
         assertEquals(want, client.getProviderState());
     }
 
     @Then("the initial CDN request has no {string} header")
     public void theInitialCdnRequestHasNoHeader(String header) {
-        assertFalse(firstCdnRequest().hasHeader(header),
+        assertFalse(getFirstCdnRequest().hasHeader(header),
                 "initial request unexpectedly carried header: " + header);
     }
 
     @Then("the {}. CDN request has the {string} header {string}")
     public void theCdnRequestHasTheHeader(int index, String header, String value) {
-        RecordedRequest request = nthCdnRequest(index-1);
+        RecordedRequest request = getNthCdnRequest(index-1);
         assertTrue(request.hasHeader(header),
                 index + ". CDN request missing expected header: " + header);
-        assertEquals(value, request.header(header),
+        assertEquals(value, request.getHeader(header),
                 index + ". CDN request " + header + " header mismatch");
     }
 
@@ -319,10 +306,10 @@ public class CdnStepDefinitions {
     @Then("the CDN has received {int} further request(s)")
     public void theCdnHasReceivedFurtherRequests(int count) {
         if (count > 0) {
-            await(COUNT_TIMEOUT, () -> furtherRequestCount() >= count);
+            waitFor(COUNT_TIMEOUT, () -> countFurtherRequests() >= count);
         }
-        holdFor(COUNT_SETTLE, () -> furtherRequestCount() == count,
-                () -> "expected " + count + " further CDN request(s), saw " + furtherRequestCount());
+        assertHoldsFor(COUNT_SETTLE, () -> countFurtherRequests() == count,
+                () -> "expected " + count + " further CDN request(s), saw " + countFurtherRequests());
         resetCountBaseline();
     }
 
@@ -332,7 +319,7 @@ public class CdnStepDefinitions {
      */
     @Then("consecutive poll ticks are one poll interval apart")
     public void consecutivePollTicksAreOnePollIntervalApart() {
-        List<Long> ticks = tickTimes();
+        List<Long> ticks = collectTickTimes();
         assertTrue(ticks.size() >= 2,
                 "need at least 2 poll ticks to compare, saw " + ticks.size());
         for (int i = 1; i < ticks.size(); i++) {
@@ -348,8 +335,8 @@ public class CdnStepDefinitions {
     @Then("the first poll tick is one poll interval after initialization completed")
     public void theFirstPollTickIsOnePollIntervalAfterInitializationCompleted() {
         long anchor = pollingStartedAtMs;
-        await(POLL_INTERVAL.plus(COUNT_TIMEOUT), () -> firstRequestAfter(anchor) != null);
-        Long firstTick = firstRequestAfter(anchor);
+        waitFor(POLL_INTERVAL.plus(COUNT_TIMEOUT), () -> findFirstRequestAfter(anchor) != null);
+        Long firstTick = findFirstRequestAfter(anchor);
         assertNotNull(firstTick, "no poll tick observed after initialization completed");
         assertCadence(firstTick - anchor, "gap between initialization completing and the first poll tick");
     }
@@ -357,20 +344,20 @@ public class CdnStepDefinitions {
     @Then("flag {string} evaluates to {word}")
     public void flagEvaluatesTo(String flag, String expected) {
         boolean want = Boolean.parseBoolean(expected);
-        assertTrue(boolMatches(flag, want),"flag " + flag + " did not evaluate to " + expected);
+        assertTrue(isFlagValue(flag, want),"flag " + flag + " did not evaluate to " + expected);
     }
 
     @Then("flag {string} eventually evaluates to {word}")
     public void flagEventuallyEvaluatesTo(String flag, String expected) {
         boolean want = Boolean.parseBoolean(expected);
-        await(RETRY_TIMEOUT, () -> boolMatches(flag, want));
+        waitFor(RETRY_TIMEOUT, () -> isFlagValue(flag, want));
     }
 
     @Then("flag {string} continues to evaluate to {word}")
     public void flagContinuesToEvaluateTo(String flag, String expected) {
         boolean want = Boolean.parseBoolean(expected);
-        assertTrue(boolMatches(flag, want), "flag " + flag + " did not evaluate to " + expected);
-        holdFor(STABLE_WINDOW, () -> boolMatches(flag, want),
+        assertTrue(isFlagValue(flag, want), "flag " + flag + " did not evaluate to " + expected);
+        assertHoldsFor(STABLE_WINDOW, () -> isFlagValue(flag, want),
                 "flag " + flag + " changed away from " + expected);
     }
 
@@ -381,22 +368,20 @@ public class CdnStepDefinitions {
                 "expected FLAG_NOT_FOUND for unknown flag " + flag + ", got " + details.getErrorCode());
     }
 
-    // ---- helpers ---------------------------------------------------------
-
     /** Remembers the sequence too, so a later step can layer a delay onto it. */
-    private void program(List<CdnResponse> responses) {
-        programmed = List.copyOf(responses);
-        mockServer.programCdn(programmed);
+    private void setCdnResponses(List<CdnResponse> responses) {
+        cdnResponses = List.copyOf(responses);
+        mockServer.setCdnResponses(cdnResponses);
     }
 
-    private void program(CdnResponse response) {
-        program(List.of(response));
+    private void setCdnResponses(CdnResponse response) {
+        setCdnResponses(List.of(response));
     }
 
-    private void delayProgrammedResponses(Duration delay) {
-        assertFalse(programmed.isEmpty(), "no CDN response programmed to delay");
-        programmed.forEach(r -> r.delay(delay));
-        mockServer.programCdn(programmed);
+    private void delayCdnResponses(Duration delay) {
+        assertFalse(cdnResponses.isEmpty(), "no CDN responses set to delay");
+        cdnResponses.forEach(r -> r.withDelay(delay));
+        mockServer.setCdnResponses(cdnResponses);
     }
 
     /** Marks the end of a scenario's arrangement: counts and tick boundaries run from here. */
@@ -406,22 +391,22 @@ public class CdnStepDefinitions {
     }
 
     private void resetCountBaseline() {
-        countBaseline = mockServer.cdnRequestCount();
+        countBaseline = mockServer.countCdnRequests();
     }
 
-    private int furtherRequestCount() {
-        return mockServer.cdnRequestCount() - countBaseline;
+    private int countFurtherRequests() {
+        return mockServer.countCdnRequests() - countBaseline;
     }
 
     /** Next tick boundary on the cadence anchored at {@link #pollingStartedAtMs}. */
-    private long nextTickAtMs() {
+    private long computeNextTickAtMs() {
         long period = POLL_INTERVAL.toMillis();
         long elapsed = System.currentTimeMillis() - pollingStartedAtMs;
         return pollingStartedAtMs + (elapsed / period + 1) * period;
     }
 
-    private Long firstRequestAfter(long epochMs) {
-        return mockServer.cdnRequests().stream()
+    private Long findFirstRequestAfter(long epochMs) {
+        return mockServer.fetchCdnRequests().stream()
                 .map(r -> r.receivedAtMs)
                 .filter(at -> at > epochMs)
                 .findFirst()
@@ -433,10 +418,10 @@ public class CdnStepDefinitions {
      * apart are the attempts of one tick (a retry follows one request timeout later), so only the
      * first of each run is a tick.
      */
-    private List<Long> tickTimes() {
+    private List<Long> collectTickTimes() {
         List<Long> ticks = new ArrayList<>();
         long previous = Long.MIN_VALUE;
-        for (RecordedRequest request : mockServer.cdnRequests()) {
+        for (RecordedRequest request : mockServer.fetchCdnRequests()) {
             if (previous == Long.MIN_VALUE || request.receivedAtMs - previous >= SAME_TICK_GAP_MS) {
                 ticks.add(request.receivedAtMs);
             }
@@ -476,19 +461,19 @@ public class CdnStepDefinitions {
         api.setProviderAndWait(domain, provider);
     }
 
-    private RecordedRequest firstCdnRequest() {
-        return nthCdnRequest(0);
+    private RecordedRequest getFirstCdnRequest() {
+        return getNthCdnRequest(0);
     }
 
     /** Returns the 0-indexed recorded CDN request, asserting at least that many were seen. */
-    private RecordedRequest nthCdnRequest(int index) {
-        List<RecordedRequest> requests = mockServer.cdnRequests();
+    private RecordedRequest getNthCdnRequest(int index) {
+        List<RecordedRequest> requests = mockServer.fetchCdnRequests();
         assertTrue(requests.size() > index,
                 "expected at least " + (index + 1) + " CDN request(s), saw " + requests.size());
         return requests.get(index);
     }
 
-    private boolean boolMatches(String flag, boolean expected) {
+    private boolean isFlagValue(String flag, boolean expected) {
         // Read through the OpenFeature client; default to the opposite so a missing flag can never
         // masquerade as the expected value.
         return client.getBooleanValue(flag, !expected) == expected;
@@ -501,7 +486,7 @@ public class CdnStepDefinitions {
      * Loads a flag configuration fixture from the test harness by its file name (extension omitted),
      * e.g. {@code "flags-v1"} -> {@code fm-provider-test-harness/flags/flags-v1.json}.
      */
-    private static String config(String flagFileName) {
+    private static String loadFlagConfig(String flagFileName) {
         Path file = FLAGS_DIR.resolve(flagFileName + ".json");
         try {
             return Files.readString(file);
@@ -510,7 +495,7 @@ public class CdnStepDefinitions {
         }
     }
 
-    private static void await(Duration timeout, BooleanSupplier condition) {
+    private static void waitFor(Duration timeout, BooleanSupplier condition) {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadline) {
             if (condition.getAsBoolean()) {
@@ -521,11 +506,11 @@ public class CdnStepDefinitions {
         assertTrue(condition.getAsBoolean(), "condition not met within " + timeout.toSeconds() + "s");
     }
 
-    private static void holdFor(Duration duration, BooleanSupplier condition, String message) {
-        holdFor(duration, condition, () -> message);
+    private static void assertHoldsFor(Duration duration, BooleanSupplier condition, String message) {
+        assertHoldsFor(duration, condition, () -> message);
     }
 
-    private static void holdFor(Duration duration, BooleanSupplier condition, Supplier<String> message) {
+    private static void assertHoldsFor(Duration duration, BooleanSupplier condition, Supplier<String> message) {
         long deadline = System.currentTimeMillis() + duration.toMillis();
         while (System.currentTimeMillis() < deadline) {
             assertTrue(condition.getAsBoolean(), message);

@@ -19,9 +19,9 @@ mvn test -P '!deploy'
 
 Tests use OkHttp `MockWebServer` for HTTP interactions; no network access is required.
 
-### End-to-end acceptance tests
+### End-to-end tests
 
-Black-box acceptance tests drive the real `DynatraceProvider` through the OpenFeature SDK against a
+Black-box e2e tests drive the real `DynatraceProvider` through the OpenFeature SDK against a
 **containerized mock server**, using the shared, cross-provider Gherkin spec.
 
 - **Spec:** the `gherkin/` feature files come from the [`fm-provider-test-harness`](fm-provider-test-harness)
