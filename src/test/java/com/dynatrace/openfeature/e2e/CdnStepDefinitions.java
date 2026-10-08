@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * {@code domain} via {@link OpenFeatureAPI#setProviderAndWait}, and every observation goes through
  * that SDK surface: flags are read with an OpenFeature {@link Client} and readiness is read from
  * {@link Client#getProviderState()} (fed by the provider's OpenFeature events). Every component the
- * provider talks to is emulated by the containerized {@link MockServer}, cdnResponses via its HTTP control API.
+ * provider talks to is emulated by the containerized {@link MockServer}, configured via its HTTP control API.
  */
 public class CdnStepDefinitions {
 
@@ -104,10 +104,10 @@ public class CdnStepDefinitions {
      */
     private long pollingStartedAtMs;
 
-    /** The CDN response sequence currently cdnResponses, so a delay can be layered onto it. */
+    /** The CDN responses currently set on the mock, so a delay can be layered onto them. */
     private List<CdnResponse> cdnResponses = List.of();
 
-    /** The Retry-After the CDN was cdnResponses with, so a scenario can wait that window out. */
+    /** The Retry-After the CDN was set up with, so a scenario can wait that window out. */
     private Duration retryAfter = Duration.ZERO;
 
     @Before
@@ -379,7 +379,7 @@ public class CdnStepDefinitions {
     }
 
     private void delayCdnResponses(Duration delay) {
-        assertFalse(cdnResponses.isEmpty(), "no CDN response cdnResponses to delay");
+        assertFalse(cdnResponses.isEmpty(), "no CDN responses set to delay");
         cdnResponses.forEach(r -> r.withDelay(delay));
         mockServer.setCdnResponses(cdnResponses);
     }

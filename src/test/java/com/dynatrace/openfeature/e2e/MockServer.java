@@ -102,7 +102,7 @@ final class MockServer {
         return baseUrl;
     }
 
-    /** Clears cdnResponses CDN responses, recorded requests and rate-limit state. */
+    /** Clears CDN responses, recorded requests and rate-limit state for a new scenario. */
     void reset() {
         sendControlRequest("POST", "/__control__/reset", null);
     }
@@ -189,7 +189,7 @@ final class MockServer {
         }
     }
 
-    /** A single cdnResponses CDN response. */
+    /** A single CDN response the mock serves. */
     static final class CdnResponse {
         final int status;
         final String body;                       // null => no body
