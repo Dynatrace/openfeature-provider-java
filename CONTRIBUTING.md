@@ -26,11 +26,11 @@ Black-box e2e tests drive the real `DynatraceProvider` through the OpenFeature S
 
 - **Spec:** the `gherkin/` feature files come from the [`fm-provider-test-harness`](fm-provider-test-harness)
   git submodule (the same spec used by the Java, Go and Python providers). See the submodule for the
-  spec and the mock-backend endpoint contract.
+  spec and the mock-server endpoint contract.
 - **Containerized:** one [Testcontainers](https://testcontainers.com/)-managed mock server emulates
   every component the provider talks to; each scenario resets it for isolation. Requires Docker.
 - **Implementation:** [`src/test/java/com/dynatrace/openfeature/e2e`](src/test/java/com/dynatrace/openfeature/e2e)
-  — the JUnit Platform Suite runner, Cucumber step definitions, and the mock-backend client.
+  — the JUnit Platform Suite runner, Cucumber step definitions, and the mock-server client.
 
 Excluded from the default unit build (`mvn test`). Run with the `e2e` profile, which syncs the
 submodule to its pinned commit first:
@@ -43,7 +43,7 @@ Override the mock-server image via the `mockserver.image` system property (or `M
 env var); skip the submodule sync while iterating on the spec locally with `-Dtestharness.skipUpdate=true`:
 
 ```bash
-mvn test -Pe2e -Dmockserver.image=ghcr.io/dynatrace/openfeature-provider-mock-backend:1.4.0
+mvn test -Pe2e -Dmockserver.image=ghcr.io/dynatrace/fm-provider-mock-server:1.4.0
 mvn test -Pe2e -Dtestharness.skipUpdate=true
 ```
 

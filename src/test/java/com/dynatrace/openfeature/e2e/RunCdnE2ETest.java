@@ -16,7 +16,7 @@ import static io.cucumber.junit.platform.engine.Constants.PLUGIN_PROPERTY_NAME;
  * which behaves the same in IDEs and Maven.
  *
  * <p>Excluded from the default unit-test run; execute with {@code mvn test -Pe2e}. Requires a
- * running Docker daemon (Testcontainers launches the mock-backend image).
+ * running Docker daemon (Testcontainers launches the mock-server image).
  */
 @Suite
 @IncludeEngines("cucumber")
