@@ -162,6 +162,19 @@ public final class DynatraceProvider extends EventProvider {
                 POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD, SSE_DISCONNECT_DEBOUNCE);
     }
 
+    // tests only: production wiring with an overridden SSE-connected poll interval and grace period
+    DynatraceProvider(String sdkKey, DynatraceProviderOptions options,
+                      Duration pollIntervalConnected, Duration gracePeriod) {
+        this(sdkKey, options, buildCdnUrl(sdkKey, options), new FlagdCore(), buildDefaultHttpClient(),
+                pollIntervalConnected, gracePeriod);
+    }
+
+    private DynatraceProvider(String sdkKey, DynatraceProviderOptions options, String cdnUrl, FlagdCore flagdCore,
+                              HttpClient httpClient, Duration pollIntervalConnected, Duration gracePeriod) {
+        this(sdkKey, options, cdnUrl, flagdCore, new CdnFetcher(cdnUrl, httpClient), httpClient,
+                pollIntervalConnected, POLL_INTERVAL_SSE_DISCONNECTED, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
+    }
+
     // tests only: as above, plus a pre-built CdnFetcher and timing controls (fixed cadence both states)
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
