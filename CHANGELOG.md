@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.5.1-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.5.0-alpha...v0.5.1-alpha) (2026-10-19)
+
+
+### ✨ New Features
+
+* sse test case implementation (ref: AI-724) ([#36](https://github.com/Dynatrace/openfeature-provider-java/issues/36)) ([50bf529](https://github.com/Dynatrace/openfeature-provider-java/commit/50bf529b735df64104d32fc28815d75696baf5f7))
+
+
+### 🐛 Bug Fixes
+
+* bound fetch duration and enforce single-flight CDN fetches ([#37](https://github.com/Dynatrace/openfeature-provider-java/issues/37)) ([ef0673d](https://github.com/Dynatrace/openfeature-provider-java/commit/ef0673dd7082ff4f887efc8245d2fcbdaaa12000))
+
+
+### 🧹 Chore
+
+* **deps:** bump com.fasterxml.jackson.core:jackson-databind from 2.22.1 to 2.22.3 ([#41](https://github.com/Dynatrace/openfeature-provider-java/issues/41)) ([1c2a1a6](https://github.com/Dynatrace/openfeature-provider-java/commit/1c2a1a6310d416133d93acd8374bbc3fc267ccb7))
+* **deps:** bump local-demo provider pin to 0.5.0-alpha ([#32](https://github.com/Dynatrace/openfeature-provider-java/issues/32)) ([abf97a5](https://github.com/Dynatrace/openfeature-provider-java/commit/abf97a5e96165473ad3fb55d411dc769f7066aee))
+* update the metrics url for LocalDemo.java NOISSUE ([#34](https://github.com/Dynatrace/openfeature-provider-java/issues/34)) ([b340003](https://github.com/Dynatrace/openfeature-provider-java/commit/b3400034deec7470b53b826a716fef382a2cf01c))
+
+
+### 📚 Documentation
+
+* align README with the standard provider format ([#35](https://github.com/Dynatrace/openfeature-provider-java/issues/35)) ([2c74f36](https://github.com/Dynatrace/openfeature-provider-java/commit/2c74f3686f8475f365a52142f21370b429cb717f))
+
+
+### 🔄 Refactoring
+
+* rename triggerSseRefetch to requestOutOfBandFetch ([#43](https://github.com/Dynatrace/openfeature-provider-java/issues/43)) ([29b5519](https://github.com/Dynatrace/openfeature-provider-java/commit/29b55197db73099cb0120f2a15f6ac494e505bdf))
+
 ## [0.5.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.4.4-alpha...v0.5.0-alpha) (2026-08-27)
 
 
