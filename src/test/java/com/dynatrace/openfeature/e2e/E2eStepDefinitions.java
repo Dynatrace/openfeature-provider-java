@@ -355,6 +355,16 @@ public class E2eStepDefinitions {
         consumeEvent(ProviderEvent.valueOf(eventName));
     }
 
+    // whole scenario, not from the cursor: a STALE that already recovered must still fail
+    @Then("no {word} event is emitted")
+    public void noProviderEventIsEmitted(String eventName) {
+        ProviderEvent unwanted = ProviderEvent.valueOf(eventName);
+        synchronized (events) {
+            assertTrue(events.stream().noneMatch(recorded -> recorded.event == unwanted),
+                    "unexpected " + eventName + " event was emitted");
+        }
+    }
+
     @Then("a PROVIDER_CONFIGURATION_CHANGED event is emitted with changed flag {string}")
     public void aConfigurationChangedEventIsEmittedWithChangedFlag(String flag) {
         EventDetails details = consumeEvent(ProviderEvent.PROVIDER_CONFIGURATION_CHANGED);
