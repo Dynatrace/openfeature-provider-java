@@ -1,3 +1,4 @@
 [submodule "fm-provider-test-harness"]
 	path = fm-provider-test-harness
 	url = https://github.com/Dynatrace/fm-provider-test-harness.git
+	branch = feat/sse-independent-staleness
