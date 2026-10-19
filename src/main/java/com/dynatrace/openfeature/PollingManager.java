@@ -133,7 +133,7 @@ final class PollingManager {
      *                              reconnect catch-up). A deferred re-fetch is dropped only when
      *                              the completed fetch already returned a config at least this new.
      */
-    synchronized void triggerSseRefetch(Long announcedLastModified) {
+    synchronized void requestOutOfBandFetch(Long announcedLastModified) {
         if (worker == null || worker.isShutdown()) {
             return;
         }

@@ -476,7 +476,7 @@ public final class DynatraceProvider extends EventProvider {
         }
         if (pm != null && (!wasConnected || hadPendingDisconnect)) {
             // Reconnect catch-up: no announced lastModified, so this re-fetch is never dropped.
-            pm.triggerSseRefetch(null);
+            pm.requestOutOfBandFetch(null);
         }
     }
 
@@ -573,7 +573,7 @@ public final class DynatraceProvider extends EventProvider {
                 msg.lastModified);
         PollingManager pm = pollingManager;
         if (pm != null) {
-            pm.triggerSseRefetch(msg.lastModified);
+            pm.requestOutOfBandFetch(msg.lastModified);
         }
     }
 

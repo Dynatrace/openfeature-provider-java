@@ -45,12 +45,12 @@ public final class ProviderTestSupport {
      * @param announcedLastModified epoch seconds announced by the notification, or null when the
      *                              announcement carried none
      */
-    public static void triggerSseRefetch(DynatraceProvider provider, Long announcedLastModified) {
+    public static void requestOutOfBandFetch(DynatraceProvider provider, Long announcedLastModified) {
         PollingManager pm = provider.pollingManager();
         if (pm == null) {
             throw new IllegalStateException("provider has not been initialized; no polling manager");
         }
-        pm.triggerSseRefetch(announcedLastModified);
+        pm.requestOutOfBandFetch(announcedLastModified);
     }
 
     private static JsonNode loadTimings() {
