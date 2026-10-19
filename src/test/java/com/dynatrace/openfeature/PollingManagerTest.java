@@ -354,7 +354,7 @@ class PollingManagerTest {
                     return new FetchResult(304, null, null, null);
                 });
         manager.start();
-        manager.triggerSseRefetch(null);
+        manager.requestOutOfBandFetch(null);
 
         assertTrue(triggered.await(2, TimeUnit.SECONDS), "SSE-triggered re-fetch should fire quickly");
     }
@@ -370,7 +370,7 @@ class PollingManagerTest {
                 Duration.ofMillis(50)
         );
         // not started: should not throw
-        assertDoesNotThrow(() -> manager.triggerSseRefetch(1_000L));
+        assertDoesNotThrow(() -> manager.requestOutOfBandFetch(1_000L));
     }
 
     @Test
@@ -395,11 +395,11 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(2_000L);
+        manager.requestOutOfBandFetch(2_000L);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
         // lands while the first is still running
-        manager.triggerSseRefetch(3_000L);
+        manager.requestOutOfBandFetch(3_000L);
         release.countDown();
 
         assertTrue(secondFetch.await(3, TimeUnit.SECONDS),
@@ -424,12 +424,12 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(2_000L);
+        manager.requestOutOfBandFetch(2_000L);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
         // five notifications while the slot is busy must collapse to a single re-fetch
         for (int i = 0; i < 5; i++) {
-            manager.triggerSseRefetch(3_000L + i);
+            manager.requestOutOfBandFetch(3_000L + i);
         }
         release.countDown();
 
@@ -460,10 +460,10 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
         release.countDown();
 
         Thread.sleep(500);
@@ -491,11 +491,11 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
         // announces a config newer than what the in-flight fetch will return
-        manager.triggerSseRefetch(1_700_000_060L);
+        manager.requestOutOfBandFetch(1_700_000_060L);
         release.countDown();
 
         Thread.sleep(500);
@@ -527,12 +527,12 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
         // newer notification first, then an out-of-order older one
-        manager.triggerSseRefetch(1_700_000_060L);
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_060L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
         release.countDown();
 
         Thread.sleep(500);
@@ -570,9 +570,9 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(null);
+        manager.requestOutOfBandFetch(null);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
-        manager.triggerSseRefetch(null); // deferred behind the in-flight fetch
+        manager.requestOutOfBandFetch(null); // deferred behind the in-flight fetch
         release.countDown();
 
         Thread.sleep(300);
@@ -583,7 +583,7 @@ class PollingManagerTest {
         // Stands in for the first notification after the window closes, announcing config we
         // already hold: on its own it is dropped as satisfied, so a fourth fetch can only come
         // from the catch-up that the skipped re-fetch put back.
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
 
         assertTrue(fourthFetch.await(5, TimeUnit.SECONDS),
                 "the unknown-lastModified catch-up must survive a re-fetch that made no request");
@@ -611,11 +611,11 @@ class PollingManagerTest {
                 });
         manager.start();
 
-        manager.triggerSseRefetch(1_700_000_000L);
+        manager.requestOutOfBandFetch(1_700_000_000L);
         assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
 
-        manager.triggerSseRefetch(1_700_000_000L); // droppable on its own
-        manager.triggerSseRefetch(null);           // unknown, must make the pending undroppable
+        manager.requestOutOfBandFetch(1_700_000_000L); // droppable on its own
+        manager.requestOutOfBandFetch(null);           // unknown, must make the pending undroppable
         release.countDown();
 
         Thread.sleep(500);

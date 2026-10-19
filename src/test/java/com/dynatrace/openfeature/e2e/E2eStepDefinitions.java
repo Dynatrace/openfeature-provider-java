@@ -344,7 +344,7 @@ public class E2eStepDefinitions {
     public void anSseRefetchIsTriggeredShortlyBeforeTheNextPollTick() {
         sleepUntil(computeNextTickAtMs() - SHORTLY_BEFORE.toMillis());
         int before = mockServer.countCdnRequests();
-        ProviderTestSupport.triggerSseRefetch(provider, null);
+        ProviderTestSupport.requestOutOfBandFetch(provider, null);
         // The re-fetch runs on the polling worker, so wait for its request to actually reach the
         // CDN. Otherwise it lands after the next step takes its baseline and is miscounted as a
         // request the contended tick made.
