@@ -22,7 +22,8 @@ public final class ProviderTestSupport {
     public static final Duration GRACE_PERIOD = timing("GRACE_PERIOD_MS");
     /** The cadence while SSE is disabled or disconnected; the CDN spec runs with SSE disabled. */
     public static final Duration SSE_DISCONNECTED_POLL_INTERVAL = DynatraceProvider.POLL_INTERVAL_SSE_DISCONNECTED;
-    public static final Duration DISCONNECT_DEBOUNCE_TIME_WINDOW = DynatraceProvider.SSE_DISCONNECT_DEBOUNCE;
+    // harness timing only; the provider no longer debounces disconnects
+    public static final Duration DISCONNECT_DEBOUNCE_TIME_WINDOW = Duration.ofSeconds(5);
 
     private ProviderTestSupport() {
     }
