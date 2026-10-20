@@ -284,7 +284,7 @@ public class E2eStepDefinitions {
         pollUntil(SETTLE, () -> mockServer.countCdnRequests() > baseline);
     }
 
-    @When("the grace period expires")
+    @When("the GRACE_PERIOD expires")
     public void theGracePeriodExpires() {
         pollUntil(ProviderTestSupport.GRACE_PERIOD.plus(SETTLE), () -> client.getProviderState() == ProviderState.ERROR);
     }
