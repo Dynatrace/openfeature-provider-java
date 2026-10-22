@@ -66,14 +66,6 @@ public final class DynatraceProvider extends EventProvider {
 
     static final Duration GRACE_PERIOD = Duration.ofMinutes(1);
 
-    /**
-     * How long to wait after an SSE fault before treating it as a real disconnect. The underlying
-     * event source auto-reconnects and fires its error/closed callbacks on every transient blip,
-     * so escalating immediately would flap STALE/READY on routine reconnects. We debounce: if the
-     * stream reopens within this window it was a blip (no-op); otherwise we escalate.
-     */
-    static final Duration SSE_DISCONNECT_DEBOUNCE = Duration.ofSeconds(5);
-
     /** SDK key format: {token}.server_{geo}_{publicRandom}.{secret}_{sha1} */
     static final Pattern KEY_PATTERN = Pattern.compile(
             "^(dt[0-9]{2})\\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$");
@@ -87,7 +79,6 @@ public final class DynatraceProvider extends EventProvider {
     private final Duration gracePeriod;
     private final Duration pollIntervalConnected;
     private final Duration pollIntervalDisconnected;
-    private final Duration sseDisconnectDebounce;
     private final DynatraceMetricsAggregator metricsAggregator;
     private final EvaluationMetricsFlusher metricsFlusher;
 
@@ -99,7 +90,7 @@ public final class DynatraceProvider extends EventProvider {
 
     private final AtomicReference<ProviderState> state = new AtomicReference<>(ProviderState.NOT_READY);
 
-    /** True while the SSE connection is considered healthy (stays true through brief blips). */
+    /** True while the SSE stream is open; only selects the poll cadence. */
     private final AtomicBoolean sseConnected = new AtomicBoolean(false);
 
     private volatile SseManager sseManager;
@@ -111,9 +102,6 @@ public final class DynatraceProvider extends EventProvider {
     // grace timer: transitions STALE -> ERROR after grace period
     private volatile ScheduledExecutorService graceScheduler;
     private volatile ScheduledFuture<?> graceTimer;
-
-    // debounce timer: escalates a sustained SSE fault to a real disconnect (see SSE_DISCONNECT_DEBOUNCE)
-    private volatile ScheduledFuture<?> sseDisconnectTimer;
 
     /**
      * Creates a provider from the SDK key. CDN URL is derived automatically from the key.
@@ -139,27 +127,21 @@ public final class DynatraceProvider extends EventProvider {
     // for testing
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD, SSE_DISCONNECT_DEBOUNCE);
+                POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD);
     }
 
     // for testing: a single fixed poll interval for both SSE states (cadence independent of SSE)
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
-        this(sdkKey, cdnUrl, flagdCore, fetcher, pollInterval, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
-    }
-
-    // for testing: fixed poll interval plus an explicit SSE-disconnect debounce
-    DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
-                      Duration pollInterval, Duration gracePeriod, Duration sseDisconnectDebounce) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                pollInterval, pollInterval, gracePeriod, sseDisconnectDebounce);
+                pollInterval, pollInterval, gracePeriod);
     }
 
     // tests only: lets tests inject every collaborator individually
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, HttpClient httpClient) {
         this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore,
                 new CdnFetcher(buildCdnUrl(sdkKey, options), httpClient), httpClient,
-                POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD, SSE_DISCONNECT_DEBOUNCE);
+                POLL_INTERVAL_SSE_CONNECTED, POLL_INTERVAL_SSE_DISCONNECTED, GRACE_PERIOD);
     }
 
     // tests only: production wiring with an overridden SSE-connected poll interval and grace period
@@ -172,28 +154,28 @@ public final class DynatraceProvider extends EventProvider {
     private DynatraceProvider(String sdkKey, DynatraceProviderOptions options, String cdnUrl, FlagdCore flagdCore,
                               HttpClient httpClient, Duration pollIntervalConnected, Duration gracePeriod) {
         this(sdkKey, options, cdnUrl, flagdCore, new CdnFetcher(cdnUrl, httpClient), httpClient,
-                pollIntervalConnected, POLL_INTERVAL_SSE_DISCONNECTED, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
+                pollIntervalConnected, POLL_INTERVAL_SSE_DISCONNECTED, gracePeriod);
     }
 
     // tests only: as above, plus a pre-built CdnFetcher and timing controls (fixed cadence both states)
     DynatraceProvider(String sdkKey, DynatraceProviderOptions options, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollInterval, Duration gracePeriod) {
         this(sdkKey, options, buildCdnUrl(sdkKey, options), flagdCore, fetcher, buildDefaultHttpClient(),
-                pollInterval, pollInterval, gracePeriod, SSE_DISCONNECT_DEBOUNCE);
+                pollInterval, pollInterval, gracePeriod);
     }
 
     // for testing: distinct connected/disconnected cadences, to observe the SSE-transition consequence
     DynatraceProvider(String sdkKey, String cdnUrl, FlagdCore flagdCore, CdnFetcher fetcher,
                       Duration pollIntervalConnected, Duration pollIntervalDisconnected,
-                      Duration gracePeriod, Duration sseDisconnectDebounce) {
+                      Duration gracePeriod) {
         this(sdkKey, null, cdnUrl, flagdCore, fetcher, buildDefaultHttpClient(),
-                pollIntervalConnected, pollIntervalDisconnected, gracePeriod, sseDisconnectDebounce);
+                pollIntervalConnected, pollIntervalDisconnected, gracePeriod);
     }
 
     private DynatraceProvider(String sdkKey, DynatraceProviderOptions options, String cdnUrl,
                               FlagdCore flagdCore, CdnFetcher fetcher, HttpClient metricsHttpClient,
                               Duration pollIntervalConnected, Duration pollIntervalDisconnected,
-                              Duration gracePeriod, Duration sseDisconnectDebounce) {
+                              Duration gracePeriod) {
         String trimmedSdkKey = validateSdkKey(sdkKey).group(0);
         DynatraceProviderOptions safeOptions = options == null ? DynatraceProviderOptions.builder().build() : options;
         this.cdnUrl = cdnUrl;
@@ -203,7 +185,6 @@ public final class DynatraceProvider extends EventProvider {
         this.pollIntervalConnected = pollIntervalConnected;
         this.pollIntervalDisconnected = pollIntervalDisconnected;
         this.gracePeriod = gracePeriod;
-        this.sseDisconnectDebounce = sseDisconnectDebounce;
         this.metricsAggregator = new DynatraceMetricsAggregator(safeOptions.getMetricsHardCapDistinctFlags());
         this.metricsFlusher = new EvaluationMetricsFlusher(
                 metricsAggregator,
@@ -445,7 +426,6 @@ public final class DynatraceProvider extends EventProvider {
             pm.stop();
         }
         cancelGraceTimer();
-        cancelSseDisconnectTimer();
         ScheduledExecutorService gs = graceScheduler;
         if (gs != null) {
             gs.shutdown();
@@ -460,88 +440,33 @@ public final class DynatraceProvider extends EventProvider {
         log.info("Dynatrace provider shut down");
     }
 
-    // -- SSE callbacks (package-private for testing) --
-
+    // SSE only selects the poll cadence; provider state follows CDN fetch outcomes alone
     synchronized void onSseConnected() {
-        // A (re)connect aborts any pending disconnect escalation. If one was pending, the stream
-        // just blipped, so pull current config in case we missed a change while it was down.
-        boolean hadPendingDisconnect = cancelSseDisconnectTimer();
-        boolean wasConnected = sseConnected.getAndSet(true);
+        sseConnected.set(true);
         PollingManager pm = pollingManager;
-        if (pm != null) {
-            pm.setInterval(pollIntervalConnected);
+        if (pm == null) {
+            return;
         }
-        if (!wasConnected) {
-            log.info("SSE connected; poll interval switched to {}", pollIntervalConnected);
-        }
-        if (pm != null && (!wasConnected || hadPendingDisconnect)) {
-            // Reconnect catch-up: no announced lastModified, so this re-fetch is never dropped.
-            pm.requestOutOfBandFetch(null);
-        }
+        log.info("SSE connected; poll interval switched to {}", pollIntervalConnected);
+        pm.setInterval(pollIntervalConnected);
+        // catch up on anything announced while the stream was down; never dropped
+        pm.requestOutOfBandFetch(null);
     }
 
-    /**
-     * SSE fault callback. The event source auto-reconnects and fires this on every transient blip,
-     * so we don't escalate immediately: we start a debounce timer (idempotent across repeat faults)
-     * and only treat it as a real disconnect if the stream hasn't reopened by the time it fires.
-     */
     synchronized void onSseDisconnected() {
-        if (!sseConnected.get()) {
-            // already escalated to disconnected; nothing to do
-            return;
-        }
-        if (sseDisconnectTimer != null && !sseDisconnectTimer.isDone()) {
-            // debounce already running; this is a repeat fault callback
-            return;
-        }
-        log.debug("SSE fault; starting {}ms disconnect debounce", sseDisconnectDebounce.toMillis());
-        try {
-            sseDisconnectTimer = graceScheduler.schedule(
-                    this::escalateSseDisconnect,
-                    sseDisconnectDebounce.toMillis(),
-                    TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException e) {
-            // scheduler already shut down; ignore
-        }
-    }
-
-    /**
-     * Runs when an SSE fault has persisted past the debounce window: switch to the aggressive poll
-     * cadence and go STALE. Switching the interval re-anchors the ticker, so the first fast poll is
-     * one (now short) interval away rather than up to a full SSE-connected interval, which closes
-     * the cadence gap without an extra out-of-band fetch that would instantly flap STALE to READY.
-     */
-    private synchronized void escalateSseDisconnect() {
         if (!sseConnected.getAndSet(false)) {
-            return; // a reconnect beat us to it
+            return;
         }
-        log.warn("SSE disconnected; increasing poll frequency to {}", pollIntervalDisconnected);
+        log.warn("SSE disconnected; poll interval switched to {}", pollIntervalDisconnected);
         PollingManager pm = pollingManager;
         if (pm != null) {
             pm.setInterval(pollIntervalDisconnected);
-        }
-        if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
-            emitProviderStale(ProviderEventDetails.builder()
-                    .message("SSE disconnected")
-                    .build());
-            startGraceTimer();
         }
     }
 
     /** The poll/fetch coordinator, or null before {@link #initialize} has run. */
     PollingManager pollingManager() {
         return pollingManager;
-    }
-
-    private synchronized boolean cancelSseDisconnectTimer() {
-        ScheduledFuture<?> timer = sseDisconnectTimer;
-        if (timer == null) {
-            return false;
-        }
-        boolean wasPending = !timer.isDone();
-        timer.cancel(false);
-        sseDisconnectTimer = null;
-        return wasPending;
     }
 
     /**
@@ -621,26 +546,15 @@ public final class DynatraceProvider extends EventProvider {
         }
     }
 
-    /**
-     * Handles a poll failure.
-     *
-     * <p>Per spec 4.1: a poll failure stays {@code READY} when SSE is healthy, since SSE
-     * continues to deliver notifications and the next poll will retry. Only
-     * when SSE is also down do we transition to {@code STALE}.
-     */
     private synchronized void onFetchFailure(String reason) {
-        if (sseConnected.get()) {
-            log.warn("poll failed (SSE healthy, staying READY): {}", reason);
-            return;
-        }
         if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
-            log.warn("poll failed and SSE disconnected, transitioning to STALE: {}", reason);
+            log.warn("fetch failed, transitioning to STALE: {}", reason);
             emitProviderStale(ProviderEventDetails.builder()
                     .message(reason)
                     .build());
             startGraceTimer();
         } else {
-            log.warn("poll failed (state={}): {}", state.get(), reason);
+            log.warn("fetch failed (state={}): {}", state.get(), reason);
         }
     }
 

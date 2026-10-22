@@ -45,9 +45,6 @@ class DynatraceProviderTest {
     private static final RetryStrategy NO_DELAY_RETRY =
             new RetryStrategy(new Random(42), ms -> {});
 
-    /** short SSE-disconnect debounce so escalation is observable quickly in tests */
-    private static final Duration TEST_SSE_DEBOUNCE = Duration.ofMillis(100);
-
     @BeforeEach
     void setUp() throws IOException {
         server = new MockWebServer();
@@ -84,7 +81,7 @@ class DynatraceProviderTest {
     private DynatraceProvider provider(Duration pollInterval, Duration gracePeriod) {
         CdnFetcher fetcher = new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY);
         return new DynatraceProvider(TEST_KEY, mockCdnUrl(), new FlagdCore(), fetcher,
-                pollInterval, gracePeriod, TEST_SSE_DEBOUNCE);
+                pollInterval, gracePeriod);
     }
 
     /** Polls {@code provider.getState()} until it equals {@code expected} or the timeout elapses. */
@@ -726,80 +723,46 @@ class DynatraceProviderTest {
     }
 
     @Test
-    void pollFailureStaysReadyWhenSseConnected() throws Exception {
-        // init succeeds
+    void pollFailureGoesStaleEvenWhenSseConnected() throws Exception {
         server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
-        // subsequent polls fail
         for (int i = 0; i < RetryStrategy.MAX_ATTEMPTS * 5; i++) {
             server.enqueue(new MockResponse().setResponseCode(503));
         }
 
         DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
         p.initialize(new ImmutableContext());
-
-        // simulate SSE connection: provider should stay READY despite poll failures
         p.onSseConnected();
 
-        Thread.sleep(300); // allow polls to fire and fail
+        // SSE delivers no configs, so a failing CDN means stale data regardless
+        awaitState(p, ProviderState.STALE, 2_000);
+        p.shutdown();
+    }
 
+    @Test
+    void sseDisconnectStaysReady() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
+        server.enqueue(new MockResponse().setResponseCode(304)); // connect catch-up
+
+        DynatraceProvider p = new DynatraceProvider(
+                TEST_KEY, mockCdnUrl(), new FlagdCore(),
+                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
+                Duration.ofSeconds(30), Duration.ofSeconds(30));
+        p.initialize(new ImmutableContext());
+        p.onSseConnected();
+
+        // repeated fault callbacks, as the event source fires on every blip
+        assertDoesNotThrow(p::onSseDisconnected);
+        assertDoesNotThrow(p::onSseDisconnected);
+        Thread.sleep(200);
+
+        // SSE only selects the cadence; state follows fetch outcomes alone
         assertEquals(ProviderState.READY, p.getState());
         p.shutdown();
     }
 
     @Test
-    void sseDisconnectTransitionsToStale() throws Exception {
-        // Long poll interval so the only fetches are SSE-triggered, not the background poller.
-        // Disconnect is debounced, so STALE arrives shortly after the debounce window elapses.
-        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
-        // absorb the immediate fetch fired on connect and on disconnect escalation
-        server.enqueue(new MockResponse().setResponseCode(304));
-        server.enqueue(new MockResponse().setResponseCode(304));
-
-        DynatraceProvider p = new DynatraceProvider(
-                TEST_KEY, mockCdnUrl(), new FlagdCore(),
-                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(30), Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
-        p.initialize(new ImmutableContext());
-        p.onSseConnected();
-
-        assertEquals(ProviderState.READY, p.getState());
-
-        // a sustained disconnect (debounce elapses with no reconnect) escalates to STALE
-        p.onSseDisconnected();
-        awaitState(p, ProviderState.STALE, 2_000);
-
-        p.shutdown();
-    }
-
-    @Test
-    void sseBlipReconnectDoesNotGoStale() throws Exception {
-        // A fault immediately followed by a reconnect (within the debounce window) is a blip:
-        // the provider must stay READY and never emit STALE.
-        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
-        server.enqueue(new MockResponse().setResponseCode(304)); // connect-triggered fetch
-        server.enqueue(new MockResponse().setResponseCode(304)); // reconnect-triggered fetch
-
-        DynatraceProvider p = new DynatraceProvider(
-                TEST_KEY, mockCdnUrl(), new FlagdCore(),
-                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(30), Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
-        p.initialize(new ImmutableContext());
-        p.onSseConnected();
-
-        // fault then reconnect before the debounce fires
-        p.onSseDisconnected();
-        p.onSseConnected();
-
-        // wait past the debounce window; state must remain READY (no escalation happened)
-        Thread.sleep(TEST_SSE_DEBOUNCE.toMillis() + 200);
-        assertEquals(ProviderState.READY, p.getState());
-
-        p.shutdown();
-    }
-
-    @Test
-    void sseDisconnectDeduplicatesMultipleCalls() throws Exception {
-        // long poll interval: no background recovery can interfere with the assertion
+    void sseConnectAndReconnectEachTriggerACatchUpFetch() throws Exception {
+        // long poll interval so the only fetches after init are the connect catch-ups
         server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
         server.enqueue(new MockResponse().setResponseCode(304));
         server.enqueue(new MockResponse().setResponseCode(304));
@@ -807,65 +770,7 @@ class DynatraceProviderTest {
         DynatraceProvider p = new DynatraceProvider(
                 TEST_KEY, mockCdnUrl(), new FlagdCore(),
                 new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(30), Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
-        p.initialize(new ImmutableContext());
-        p.onSseConnected();
-
-        // repeated fault callbacks (the event source fires these on every blip) must not throw and
-        // must collapse to a single escalation
-        assertDoesNotThrow(p::onSseDisconnected);
-        assertDoesNotThrow(p::onSseDisconnected);
-        assertDoesNotThrow(p::onSseDisconnected);
-        awaitState(p, ProviderState.STALE, 2_000);
-
-        p.shutdown();
-    }
-
-    @Test
-    void sseDisconnectGoesStaleThenRecoversThroughPoll() throws Exception {
-        // First request serves the config; afterwards the CDN's health is toggled by cdnFailing,
-        // so STALE persists while it fails and the fast poll cadence recovers once it is healthy.
-        AtomicBoolean cdnFailing = new AtomicBoolean(false);
-        server.setDispatcher(new Dispatcher() {
-            private boolean served;
-            @Override
-            public MockResponse dispatch(RecordedRequest request) {
-                if (!served) {
-                    served = true;
-                    return new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG);
-                }
-                return cdnFailing.get()
-                        ? new MockResponse().setResponseCode(503)
-                        : new MockResponse().setResponseCode(304);
-            }
-        });
-
-        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
-        p.initialize(new ImmutableContext());
-        p.onSseConnected();
-
-        // CDN starts failing, then SSE drops: the debounced disconnect escalates to STALE and the
-        // failing fast polls keep it there.
-        cdnFailing.set(true);
-        p.onSseDisconnected();
-        awaitState(p, ProviderState.STALE, 2_000);
-
-        // CDN healthy again: the fast poll cadence recovers to READY
-        cdnFailing.set(false);
-        awaitState(p, ProviderState.READY, 2_000);
-        p.shutdown();
-    }
-
-    @Test
-    void sseConnectTriggersImmediateFetch() throws Exception {
-        // long poll interval so the only fetch after init is the one triggered by connect
-        server.enqueue(new MockResponse().setResponseCode(200).setBody(FLAG_CONFIG));
-        server.enqueue(new MockResponse().setResponseCode(304));
-
-        DynatraceProvider p = new DynatraceProvider(
-                TEST_KEY, mockCdnUrl(), new FlagdCore(),
-                new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                Duration.ofSeconds(60), Duration.ofSeconds(60), TEST_SSE_DEBOUNCE);
+                Duration.ofSeconds(60), Duration.ofSeconds(60));
         p.initialize(new ImmutableContext());
         server.takeRequest(); // initial fetch
 
@@ -873,6 +778,11 @@ class DynatraceProviderTest {
 
         assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
                 "SSE connect should trigger an immediate re-fetch to catch missed changes");
+
+        p.onSseDisconnected();
+        p.onSseConnected();
+        assertNotNull(server.takeRequest(2, java.util.concurrent.TimeUnit.SECONDS),
+                "SSE reconnect should trigger a catch-up re-fetch");
         p.shutdown();
     }
 
@@ -880,7 +790,7 @@ class DynatraceProviderTest {
     void pollCadenceSlowsWhenSseConnectedAndSpeedsUpOnDisconnect() throws Exception {
         // Assert the consequence of the SSE transitions (not just the state change): the poll
         // cadence is the slow safety-net interval while connected and the fast interval once
-        // disconnect escalates. We count fetches over equal windows in each mode.
+        // disconnected. We count fetches over equal windows in each mode.
         AtomicInteger fetches = new AtomicInteger();
         server.setDispatcher(new Dispatcher() {
             private boolean served;
@@ -900,7 +810,7 @@ class DynatraceProviderTest {
         DynatraceProvider p = new DynatraceProvider(
                 TEST_KEY, mockCdnUrl(), new FlagdCore(),
                 new CdnFetcher(mockCdnUrl(), httpClient, NO_DELAY_RETRY),
-                connected, disconnected, Duration.ofSeconds(30), TEST_SSE_DEBOUNCE);
+                connected, disconnected, Duration.ofSeconds(30));
         p.initialize(new ImmutableContext());
 
         // connected, slow cadence: no periodic poll should fire in a 300ms window
@@ -910,9 +820,9 @@ class DynatraceProviderTest {
         Thread.sleep(300);
         int whileConnected = fetches.get();
 
-        // disconnected, after debounce, fast cadence: many polls in the same window
+        // disconnected, fast cadence: many polls in the same window
         p.onSseDisconnected();
-        Thread.sleep(TEST_SSE_DEBOUNCE.toMillis() + 100); // let escalation/interval switch settle
+        Thread.sleep(100); // let the interval switch settle
         fetches.set(0);
         Thread.sleep(300);
         int whileDisconnected = fetches.get();
