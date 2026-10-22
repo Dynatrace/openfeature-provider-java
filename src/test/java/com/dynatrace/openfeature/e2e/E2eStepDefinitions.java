@@ -183,11 +183,11 @@ public class E2eStepDefinitions {
     }
 
     // header and value are null when the step has no "with ... header ..." suffix
-    @Given("^an initialized, READY provider serving the \"([^\"]*)\" flag configuration(?: with \"([^\"]*)\" header \"([^\"]*)\")?$")
+    @Given("^an initialized, READY provider serving the \"([^\"]*)\" flag configuration(?: with \"([^\"]*)\" header (\"[^\"]*\"|'[^']*'))?$")
     public void anInitializedReadyProviderServingTheFlagConfiguration(String flagFileName, String header, String value) {
         sdkKey = BASE_KEY;
         CdnResponse response = CdnResponse.of(200, loadFlagConfig(flagFileName));
-        setCdnResponses(header == null ? response : response.withHeader(header, value));
+        setCdnResponses(header == null ? response : response.withHeader(header, unquote(value)));
         registerProviderWithSdk();
         assertEquals(ProviderState.READY, client.getProviderState());
         awaitSseSettled();
