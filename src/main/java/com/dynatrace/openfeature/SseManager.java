@@ -38,9 +38,7 @@ final class SseManager {
     void start() {
         EventSource.Builder eventSourceBuilder = new EventSource.Builder(ConnectStrategy.http(URI.create(sseUrl)).clientBuilderActions(clientBuilder ->
                 clientBuilder
-                        .connectTimeout(100, TimeUnit.MINUTES)
-                        .readTimeout(100, TimeUnit.MINUTES)
-                        .writeTimeout(100, TimeUnit.MINUTES)
+                        .readTimeout(150, TimeUnit.SECONDS)
         ));
         backgroundEventSource = new BackgroundEventSource.Builder(createHandler(), eventSourceBuilder).build();
         backgroundEventSource.start();
