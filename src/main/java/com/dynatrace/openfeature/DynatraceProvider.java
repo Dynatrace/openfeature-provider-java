@@ -534,6 +534,9 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     private synchronized void onFetchSuccess() {
+        if (sseConnected.get()) {
+            pollingManager.setInterval(pollIntervalConnected);
+        }
         cancelGraceTimer();
         ProviderState current = state.get();
         if (current == ProviderState.STALE || current == ProviderState.ERROR) {
@@ -547,6 +550,8 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     private synchronized void onFetchFailure(String reason) {
+        // fetch at the fast cadence until one succeeds, even with SSE connected
+        pollingManager.setInterval(pollIntervalDisconnected);
         if (state.compareAndSet(ProviderState.READY, ProviderState.STALE)) {
             log.warn("fetch failed, transitioning to STALE: {}", reason);
             emitProviderStale(ProviderEventDetails.builder()
