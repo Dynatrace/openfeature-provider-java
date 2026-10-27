@@ -447,8 +447,11 @@ public final class DynatraceProvider extends EventProvider {
         if (pm == null) {
             return;
         }
-        log.info("SSE connected; poll interval switched to {}", pollIntervalConnected);
-        pm.setInterval(pollIntervalConnected);
+        // stay at the fast cadence until a fetch succeeds
+        if (state.get() == ProviderState.READY) {
+            log.info("SSE connected; poll interval switched to {}", pollIntervalConnected);
+            pm.setInterval(pollIntervalConnected);
+        }
         // catch up on anything announced while the stream was down; never dropped
         pm.requestOutOfBandFetch(null);
     }
