@@ -21,6 +21,9 @@ final class SseManager {
 
     private static final Logger log = LoggerFactory.getLogger(SseManager.class);
 
+    // drops a silent stream; tolerates one missed 60s keepalive
+    private static final long IDLE_TIMEOUT_SECONDS = 150;
+
     private final String sseUrl;
     private final Runnable onConnected;
     private final Runnable onDisconnected;
@@ -38,7 +41,7 @@ final class SseManager {
     void start() {
         EventSource.Builder eventSourceBuilder = new EventSource.Builder(ConnectStrategy.http(URI.create(sseUrl)).clientBuilderActions(clientBuilder ->
                 clientBuilder
-                        .readTimeout(150, TimeUnit.SECONDS)
+                        .readTimeout(IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         ));
         backgroundEventSource = new BackgroundEventSource.Builder(createHandler(), eventSourceBuilder).build();
         backgroundEventSource.start();
