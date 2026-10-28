@@ -40,7 +40,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <openfeature-sdk.version>1.19.1</openfeature-sdk.version>
-        <flagd-core.version>[1.0.0,2.0.0)</flagd-core.version>
+        <flagd-core.version>[3.0.0,4.0.0)</flagd-core.version>
         <!-- Aligned with the version flagd-core already pulls in transitively; declared
              explicitly so we don't silently break if flagd-core changes its Jackson dep. -->
         <jackson.version>2.22.3</jackson.version>
