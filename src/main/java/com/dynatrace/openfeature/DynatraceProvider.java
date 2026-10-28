@@ -248,16 +248,17 @@ public final class DynatraceProvider extends EventProvider {
     }
 
     /**
-     * Fetches the initial configuration from the CDN, opens the SSE connection, starts polling,
+     * Fetches the initial configuration from the CDN, starts polling, opens the SSE connection,
      * and starts the evaluation-metrics flusher.
      *
      * <p>Initialization order (per spec 3.1):
      * <ol>
      *   <li>Fetch flagd config JSON from CDN</li>
      *   <li>Load config into flagd-core</li>
-     *   <li>Open SSE connection (async; errors handled by callbacks)</li>
      *   <li>Start polling timer, only once step 1 has completed, so the initial fetch never
      *       contends with the first tick (spec 2.1.1)</li>
+     *   <li>Open SSE connection (async; errors handled by callbacks), only once polling has
+     *       started, so the catch-up fetch on connect has a manager to run on</li>
      *   <li>Emit {@code PROVIDER_READY} (via return)</li>
      * </ol>
      *
@@ -283,6 +284,7 @@ public final class DynatraceProvider extends EventProvider {
         });
 
         RuntimeException initFailure = null;
+        String initialConfig = null;
         try {
             FetchResult result;
             try {
@@ -311,9 +313,7 @@ public final class DynatraceProvider extends EventProvider {
             }
 
             state.set(ProviderState.READY);
-
-            // open SSE connection (spec 3.1 step 3)
-            ensureSseStarted(body);
+            initialConfig = body;
         } catch (RuntimeException e) {
             // Don't rethrow yet: polling below recovers, and invalidating stops a phantom 304
             // from "recovering" to READY with no flags loaded.
@@ -334,12 +334,11 @@ public final class DynatraceProvider extends EventProvider {
                 this::onFetchFailure,
                 pollIntervalDisconnected);
         pollingManager.start();
-        // If SSE connected during init (before the manager existed), adopt the connected cadence.
-        if (sseConnected.get()) {
-            pollingManager.setInterval(pollIntervalConnected);
-        }
-
         metricsFlusher.start();
+
+        if (initialConfig != null) {
+            ensureSseStarted(initialConfig);
+        }
 
         if (initFailure != null) {
             throw initFailure;
