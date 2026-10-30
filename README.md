@@ -12,12 +12,12 @@ The provider evaluates flags in-process: on initialization it fetches your flag 
 <dependency>
   <groupId>com.dynatrace.openfeature</groupId>
   <artifactId>dynatrace-openfeature-provider-java</artifactId>
-  <version>0.5.0-alpha</version> <!-- x-release-please-version -->
+  <version>0.6.0-alpha</version> <!-- x-release-please-version -->
 </dependency>
 ```
 
 ```groovy
-implementation 'com.dynatrace.openfeature:dynatrace-openfeature-provider-java:0.5.0-alpha' // x-release-please-version
+implementation 'com.dynatrace.openfeature:dynatrace-openfeature-provider-java:0.6.0-alpha' // x-release-please-version
 ```
 
 ## Usage
