@@ -183,11 +183,11 @@ public class E2eStepDefinitions {
     }
 
     // header and value are null when the step has no "with ... header ..." suffix
-    @Given("^an initialized, READY provider serving the \"([^\"]*)\" flag configuration(?: with \"([^\"]*)\" header \"([^\"]*)\")?$")
+    @Given("^an initialized, READY provider serving the \"([^\"]*)\" flag configuration(?: with \"([^\"]*)\" header (\"[^\"]*\"|'[^']*'))?$")
     public void anInitializedReadyProviderServingTheFlagConfiguration(String flagFileName, String header, String value) {
         sdkKey = BASE_KEY;
         CdnResponse response = CdnResponse.of(200, loadFlagConfig(flagFileName));
-        setCdnResponses(header == null ? response : response.withHeader(header, value));
+        setCdnResponses(header == null ? response : response.withHeader(header, unquote(value)));
         registerProviderWithSdk();
         assertEquals(ProviderState.READY, client.getProviderState());
         awaitSseSettled();
@@ -257,44 +257,22 @@ public class E2eStepDefinitions {
         awaitCdnRequestWithin(POLL_TIMEOUT);
     }
 
-    @When("polling triggers a configuration refetch after the SSE_DISCONNECTED_POLL_INTERVAL")
-    public void pollingTriggersAConfigurationRefetchAfterTheSseDisconnectedPollInterval() {
-        awaitCdnRequestWithin(ProviderTestSupport.SSE_DISCONNECTED_POLL_INTERVAL);
-    }
-
-    @When("polling triggers a configuration refetch after the SSE_CONNECTED_POLL_INTERVAL")
-    public void pollingTriggersAConfigurationRefetchAfterTheSseConnectedPollInterval() {
-        awaitCdnRequestWithin(ProviderTestSupport.SSE_CONNECTED_POLL_INTERVAL);
-    }
-
     /**
      * A blip: the backend drops the stream and refuses connections for {@code outageSeconds}, then accepts them again.
      */
-    @When("the SSE stream drops for {int} seconds and reconnects within the DISCONNECT_DEBOUNCE_TIME_WINDOW")
-    public void theSseStreamDropsForSecondsAndReconnectsWithinTheDebounceWindow(int outageSeconds) {
-        Duration debounce = ProviderTestSupport.DISCONNECT_DEBOUNCE_TIME_WINDOW;
+    @When("the SSE stream drops for {int} seconds and reconnects")
+    public void theSseStreamDropsForSecondsAndReconnects(int outageSeconds) {
         mockServer.dropSse(Duration.ofSeconds(outageSeconds));
-        assertTrue(pollUntil(debounce, () -> mockServer.sseClientCount() >= 1),
-                "SSE did not reconnect within the " + debounce.toSeconds() + "s disconnect debounce window");
+        assertTrue(pollUntil(SSE_RECONNECT_TIMEOUT, () -> mockServer.sseClientCount() >= 1),
+                "SSE did not reconnect after the " + outageSeconds + "s outage");
     }
 
     /**
      * A sustained outage: connections stay refused until the stream is restored or reset.
      */
-    @When("the SSE stream drops and stays down past the DISCONNECT_DEBOUNCE_TIME_WINDOW")
-    public void theSseStreamDropsAndStaysDownPastTheDebounceWindow() {
+    @When("the SSE stream drops and stays down")
+    public void theSseStreamDropsAndStaysDown() {
         mockServer.dropSse();
-        // Hand the provider its debounce window (plus slack) to escalate the fault to a disconnect;
-        // the following Then steps assert what that escalation did.
-        pollUntil(ProviderTestSupport.DISCONNECT_DEBOUNCE_TIME_WINDOW.plus(SETTLE),
-                () -> client.getProviderState() != ProviderState.READY);
-    }
-
-    @When("the SSE stream reconnects")
-    public void theSseStreamReconnects() {
-        mockServer.restoreSse();
-        assertTrue(pollUntil(SSE_RECONNECT_TIMEOUT, () -> mockServer.sseClientCount() >= 1),
-                "SSE did not reconnect after the outage was lifted");
     }
 
     @When("^the server emits an SSE message (.*)$")
@@ -306,7 +284,7 @@ public class E2eStepDefinitions {
         pollUntil(SETTLE, () -> mockServer.countCdnRequests() > baseline);
     }
 
-    @When("the grace period expires")
+    @When("the GRACE_PERIOD expires")
     public void theGracePeriodExpires() {
         pollUntil(ProviderTestSupport.GRACE_PERIOD.plus(SETTLE), () -> client.getProviderState() == ProviderState.ERROR);
     }
@@ -375,6 +353,16 @@ public class E2eStepDefinitions {
     @Then("a {word} event is emitted")
     public void aProviderEventIsEmitted(String eventName) {
         consumeEvent(ProviderEvent.valueOf(eventName));
+    }
+
+    // whole scenario, not from the cursor: a STALE that already recovered must still fail
+    @Then("no {word} event is emitted")
+    public void noProviderEventIsEmitted(String eventName) {
+        ProviderEvent unwanted = ProviderEvent.valueOf(eventName);
+        synchronized (events) {
+            assertTrue(events.stream().noneMatch(recorded -> recorded.event == unwanted),
+                    "unexpected " + eventName + " event was emitted");
+        }
     }
 
     @Then("a PROVIDER_CONFIGURATION_CHANGED event is emitted with changed flag {string}")
