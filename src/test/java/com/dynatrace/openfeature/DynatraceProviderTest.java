@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
@@ -1060,10 +1061,9 @@ class DynatraceProviderTest {
 
     @Test
     void invalidInitialConfigDoesNotRecoverToReadyOnA304() throws Exception {
-        // The initial 200 carries a body flagd-core rejects. CdnFetcher caches that response's
-        // ETag anyway, so the next poll revalidates and gets a 304. A 304 means "what you have
-        // is current", but nothing was ever applied, so recovering to READY would advertise an
-        // empty flag store as healthy.
+        // The initial 200 carries a body flagd-core rejects, so its ETag must never be committed.
+        // If it were, the next poll would revalidate and get a 304 ("what you have is current")
+        // for a config that was never applied, advertising an empty flag store as healthy.
         String badEtag = "\"bad-config\"";
         server.setDispatcher(new Dispatcher() {
             @Override
@@ -1086,6 +1086,40 @@ class DynatraceProviderTest {
         assertNotEquals(ProviderState.READY, p.getState(),
                 "a 304 for a config that was never applied must not report READY");
         p.shutdown();
+    }
+
+    @Test
+    void emptyPollBodyKeepsTheAppliedValidators() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        List<String> ifNoneMatch = Collections.synchronizedList(new ArrayList<>());
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                ifNoneMatch.add(String.valueOf(request.getHeader(CdnFetcher.HEADER_IF_NONE_MATCH)));
+                int n = requests.getAndIncrement();
+                if (n == 0) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader(CdnFetcher.HEADER_ETAG, "\"v1\"").setBody(FLAG_CONFIG);
+                }
+                if (n == 1) {
+                    return new MockResponse().setResponseCode(200)
+                            .addHeader(CdnFetcher.HEADER_ETAG, "\"v2\"").setBody("");
+                }
+                return new MockResponse().setResponseCode(304);
+            }
+        });
+
+        DynatraceProvider p = fastProvider(Duration.ofSeconds(10));
+        p.initialize(new ImmutableContext());
+        long deadline = System.currentTimeMillis() + 3_000;
+        while (requests.get() < 3 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        p.shutdown();
+
+        assertTrue(ifNoneMatch.size() >= 3, "expected a poll after the empty body");
+        // the empty body never applied, so the next poll revalidates the applied config
+        assertEquals("\"v1\"", ifNoneMatch.get(2));
     }
 
     @Test

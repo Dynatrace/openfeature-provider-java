@@ -77,12 +77,56 @@ class CdnFetcherTest {
 
         CdnFetcher fetcher = fetcher();
         fetcher.fetch();
+        fetcher.commit();
         fetcher.fetch();
 
         server.takeRequest();
         RecordedRequest second = server.takeRequest();
         assertEquals(TEST_ETAG, second.getHeader(CdnFetcher.HEADER_IF_NONE_MATCH));
         assertEquals(LAST_MODIFIED_OLD, second.getHeader(CdnFetcher.HEADER_IF_MODIFIED_SINCE));
+    }
+
+    @Test
+    void uncommittedFetchKeepsThePreviousValidators() throws IOException, InterruptedException {
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody(MINIMAL_FLAGS_BODY)
+                .addHeader(CdnFetcher.HEADER_ETAG, TEST_ETAG));
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("")
+                .addHeader(CdnFetcher.HEADER_ETAG, "\"v2\""));
+        server.enqueue(new MockResponse().setResponseCode(304));
+
+        CdnFetcher fetcher = fetcher();
+        fetcher.fetch();
+        fetcher.commit();
+        // a body the caller never applied must not replace the validators in force
+        fetcher.fetch();
+        fetcher.fetch();
+
+        server.takeRequest();
+        server.takeRequest();
+        assertEquals(TEST_ETAG, server.takeRequest().getHeader(CdnFetcher.HEADER_IF_NONE_MATCH));
+    }
+
+    @Test
+    void isNewerThanCommittedComparesAgainstTheAppliedConfig() throws IOException {
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody(MINIMAL_FLAGS_BODY)
+                .addHeader(CdnFetcher.HEADER_LAST_MODIFIED, LAST_MODIFIED_OLD));
+
+        CdnFetcher fetcher = fetcher();
+        long lastModified = HttpDates.parseEpochSeconds(LAST_MODIFIED_OLD);
+        // nothing committed yet, so any Last-Modified is newer
+        assertTrue(fetcher.isNewerThanCommitted(0));
+        fetcher.fetch();
+        // fetched but not committed
+        assertTrue(fetcher.isNewerThanCommitted(lastModified));
+        fetcher.commit();
+        assertFalse(fetcher.isNewerThanCommitted(lastModified));
+        assertTrue(fetcher.isNewerThanCommitted(lastModified + 1));
     }
 
     @Test
@@ -96,6 +140,7 @@ class CdnFetcherTest {
 
         CdnFetcher fetcher = fetcher();
         fetcher.fetch();
+        fetcher.commit();
         FetchResult result = fetcher.fetch();
 
         assertTrue(result.isNotModified());
@@ -206,6 +251,7 @@ class CdnFetcherTest {
 
         CdnFetcher fetcher = fetcher();
         fetcher.fetch();
+        fetcher.commit();
         FetchResult result = fetcher.fetch();
 
         assertTrue(result.isNotModified());
@@ -227,6 +273,7 @@ class CdnFetcherTest {
 
         CdnFetcher fetcher = fetcher();
         fetcher.fetch();
+        fetcher.commit();
         FetchResult result = fetcher.fetch();
 
         assertTrue(result.isNotModified());
@@ -247,6 +294,7 @@ class CdnFetcherTest {
 
         CdnFetcher fetcher = fetcher();
         fetcher.fetch();
+        fetcher.commit();
         FetchResult result = fetcher.fetch();
 
         assertTrue(result.isSuccess());

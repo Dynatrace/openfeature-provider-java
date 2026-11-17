@@ -307,6 +307,7 @@ public final class DynatraceProvider extends EventProvider {
 
             try {
                 flagdCore.setFlags(body);
+                fetcher.commit();
                 updateMetricsVersionFromFlagSet();
             } catch (FlagStoreException e) {
                 throw new RuntimeException("initial CDN config is invalid: " + e.getMessage(), e);
@@ -315,10 +316,8 @@ public final class DynatraceProvider extends EventProvider {
             state.set(ProviderState.READY);
             initialConfig = body;
         } catch (RuntimeException e) {
-            // Don't rethrow yet: polling below recovers, and invalidating stops a phantom 304
-            // from "recovering" to READY with no flags loaded.
+            // Don't rethrow yet: polling below recovers; nothing was committed, so its first fetch is unconditional.
             initFailure = e;
-            fetcher.invalidateCache();
             state.set(ProviderState.ERROR);
             log.error("initialization failed; starting polling-only recovery at {}: {}",
                     pollIntervalDisconnected, e.getMessage());
@@ -329,6 +328,8 @@ public final class DynatraceProvider extends EventProvider {
         pollingManager = new PollingManager(
                 fetcher::fetch,
                 this::storeFlags,
+                fetcher::commit,
+                fetcher::isNewerThanCommitted,
                 this::onConfigurationChanged,
                 this::onFetchSuccess,
                 this::onFetchFailure,
@@ -518,8 +519,6 @@ public final class DynatraceProvider extends EventProvider {
             ensureSseStarted(json);
             return changed;
         } catch (FlagStoreException e) {
-            // This body was rejected, so the validators cached for it must not stand in for it.
-            fetcher.invalidateCache();
             throw new RuntimeException("failed to store flag configuration: " + e.getMessage(), e);
         }
     }
