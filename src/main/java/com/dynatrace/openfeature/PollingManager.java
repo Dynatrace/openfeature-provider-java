@@ -15,6 +15,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongPredicate;
 
 /**
  * Manages periodic polling of flag configurations at a fixed, start-anchored cadence.
@@ -48,6 +49,8 @@ final class PollingManager {
 
     private final Callable<FetchResult> fetchFlags;
     private final Function<String, List<String>> storeFlags;
+    private final Runnable commitFetch;
+    private final LongPredicate isNewerThanCommitted;
     private final Consumer<List<String>> emitChange;
     private final Runnable emitSuccess;
     private final Consumer<String> emitFailure;
@@ -80,22 +83,28 @@ final class PollingManager {
     private Long inFlightSseRefetchAt;
 
     /**
-     * @param fetchFlags      called to fetch flag configuration JSON from the CDN
-     * @param storeFlags      called to store the fetched JSON; returns changed flag keys
-     * @param emitChange      called with changed flag keys after a successful store
-     * @param emitSuccess     called after any successful poll (including 304 not-modified)
-     * @param emitFailure     called with a reason string when a poll fails
-     * @param initialInterval the starting poll cadence; change at runtime via {@link #setInterval}
+     * @param fetchFlags           called to fetch flag configuration JSON from the CDN
+     * @param storeFlags           called to store the fetched JSON; returns changed flag keys
+     * @param commitFetch          called after a successful store to commit the fetcher's staged validators
+     * @param isNewerThanCommitted whether an epoch-seconds Last-Modified is newer than the committed config
+     * @param emitChange           called with changed flag keys after a successful store
+     * @param emitSuccess          called after any successful poll (including 304 not-modified)
+     * @param emitFailure          called with a reason string when a poll fails
+     * @param initialInterval      the starting poll cadence; change at runtime via {@link #setInterval}
      */
     PollingManager(
             Callable<FetchResult> fetchFlags,
             Function<String, List<String>> storeFlags,
+            Runnable commitFetch,
+            LongPredicate isNewerThanCommitted,
             Consumer<List<String>> emitChange,
             Runnable emitSuccess,
             Consumer<String> emitFailure,
             Duration initialInterval) {
         this.fetchFlags = fetchFlags;
         this.storeFlags = storeFlags;
+        this.commitFetch = commitFetch;
+        this.isNewerThanCommitted = isNewerThanCommitted;
         this.emitChange = emitChange;
         this.emitSuccess = emitSuccess;
         this.emitFailure = emitFailure;
@@ -127,11 +136,10 @@ final class PollingManager {
     /**
      * Requests an out-of-band fetch on behalf of SSE. Runs immediately if the fetch slot is free,
      * otherwise it is deferred and coalesced. Safe to call from any thread; does not disturb the
-     * ticker cadence.
+     * ticker cadence. A deferred re-fetch is dropped if the committed config is already at least as
+     * new as the announcement.
      *
-     * @param announcedLastModified epoch seconds from the SSE message, or null when unknown (a
-     *                              reconnect catch-up). A deferred re-fetch is dropped only when
-     *                              the completed fetch already returned a config at least this new.
+     * @param announcedLastModified epoch seconds from the SSE message, or null on reconnect catch-up
      */
     synchronized void requestOutOfBandFetch(Long announcedLastModified) {
         if (worker == null || worker.isShutdown()) {
@@ -247,26 +255,22 @@ final class PollingManager {
             }
             return;
         }
-        issuePendingSseRefetch(completed);
+        issuePendingSseRefetch();
     }
 
     /**
      * Issues the deferred SSE re-fetch, if any, now that the slot is free. Runs on the worker
      * thread, so the re-fetch it submits queues behind the current task rather than overlapping it.
-     *
-     * @param completed result of the fetch that just finished, which made a request
      */
-    private synchronized void issuePendingSseRefetch(FetchResult completed) {
+    private synchronized void issuePendingSseRefetch() {
         if (pendingSseRefetchAt == null || worker == null || worker.isShutdown()) {
             return;
         }
         long announced = pendingSseRefetchAt;
         pendingSseRefetchAt = null;
 
-        Long observed = completed == null ? null : HttpDates.parseEpochSeconds(completed.getLastModified());
-        if (announced != LAST_MODIFIED_UNKNOWN && observed != null && observed >= announced) {
-            log.debug("dropping deferred SSE re-fetch: completed fetch already returned "
-                    + "Last-Modified {} >= announced {}", observed, announced);
+        if (announced != LAST_MODIFIED_UNKNOWN && !isNewerThanCommitted.test(announced)) {
+            log.debug("dropping deferred SSE re-fetch: committed config is at least as new as {}", announced);
             return;
         }
         log.debug("issuing deferred SSE re-fetch");
@@ -303,6 +307,7 @@ final class PollingManager {
         }
 
         List<String> changedKeys = storeFlags.apply(body);
+        commitFetch.run();
         emitSuccess.run();
 
         if (changedKeys != null && !changedKeys.isEmpty()) {

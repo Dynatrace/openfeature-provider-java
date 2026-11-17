@@ -54,8 +54,11 @@ final class CdnFetcher {
     private final HttpClient httpClient;
     private final RetryStrategy retryStrategy;
 
-    // mutated in doFetch() under fetchLock; also cleared by invalidateCache() from other threads
+    // validators sent on the next request; promoted from pendingState by commit()
     private volatile CacheState state = CacheState.EMPTY;
+
+    // validators of the last 2xx, staged until the caller has applied its body
+    private volatile CacheState pendingState;
 
     // rate limit tracking; read outside the lock by isRateLimited()
     private final AtomicLong rateLimitedUntil = new AtomicLong(0);
@@ -74,15 +77,24 @@ final class CdnFetcher {
     }
 
     /**
-     * Drops the cached ETag / Last-Modified so the next fetch is unconditional.
+     * Promotes the validators staged by the last successful fetch.
      *
-     * <p>Call this when a fetched body could not be applied. The validators are stored as soon as
-     * a 2xx arrives, before the caller has had a chance to reject the body, so leaving them in
-     * place would make the next fetch revalidate to 304 ("what you have is current") for a config
-     * that was never actually loaded.
+     * <p>Call this only once the fetched body has been applied. Until then the previous validators
+     * stay in force, so a body that is empty or fails to store is re-requested in full on the next
+     * fetch instead of being answered with a 304 for a config that was never actually loaded.
      */
-    void invalidateCache() {
-        state = CacheState.EMPTY;
+    void commit() {
+        CacheState pending = pendingState;
+        if (pending != null) {
+            state = pending;
+            pendingState = null;
+        }
+    }
+
+    /** Whether {@code lastModifiedEpochSeconds} is newer than the configuration last committed. */
+    boolean isNewerThanCommitted(long lastModifiedEpochSeconds) {
+        ZonedDateTime committed = state.lastModifiedAt;
+        return committed == null || lastModifiedEpochSeconds > committed.toEpochSecond();
     }
 
     /** Returns true if a 429 Retry-After period is still active. */
@@ -122,6 +134,7 @@ final class CdnFetcher {
     }
 
     private FetchResult doFetch() throws IOException {
+        pendingState = null;
         CacheState current = state;
         String currentLastModifiedHeader = HttpDates.format(current.lastModifiedAt);
 
@@ -176,8 +189,8 @@ final class CdnFetcher {
                 return new FetchResult(304, null, current.etag, currentLastModifiedHeader);
             }
 
-            // store only what this response gave us; never mix tokens across requests
-            state = new CacheState(newEtag, newLastModifiedAt);
+            // stage only what this response gave us; never mix tokens across requests
+            pendingState = new CacheState(newEtag, newLastModifiedAt);
         }
 
         return new FetchResult(statusCode, body, newEtag, newLastModified);

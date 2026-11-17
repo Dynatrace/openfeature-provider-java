@@ -31,21 +31,51 @@ class PollingManagerTest {
         }
     }
 
+    // mirrors CdnFetcher: a fetch stages its result, commitFetch commits it
+    private final AtomicReference<FetchResult> staged = new AtomicReference<>();
+    private final AtomicReference<FetchResult> committed = new AtomicReference<>();
+
+    private Callable<FetchResult> staging(Callable<FetchResult> fetchFlags) {
+        return () -> {
+            FetchResult result = fetchFlags.call();
+            staged.set(result);
+            return result;
+        };
+    }
+
+    private void commitStaged() {
+        committed.set(staged.get());
+    }
+
+    private boolean isNewerThanCommitted(long lastModifiedEpochSeconds) {
+        FetchResult result = committed.get();
+        Long committedAt = result == null ? null : HttpDates.parseEpochSeconds(result.getLastModified());
+        return committedAt == null || lastModifiedEpochSeconds > committedAt;
+    }
+
     private PollingManager create(
             Callable<FetchResult> fetchFlags,
             Function<String, List<String>> storeFlags,
             Consumer<List<String>> emitChange,
             Runnable emitSuccess,
             Consumer<String> emitFailure) {
-        manager = new PollingManager(fetchFlags, storeFlags, emitChange, emitSuccess, emitFailure, Duration.ofMillis(50));
+        manager = new PollingManager(staging(fetchFlags), storeFlags, this::commitStaged, this::isNewerThanCommitted,
+                emitChange, emitSuccess, emitFailure, Duration.ofMillis(50));
         return manager;
     }
 
     /** Manager with no-op callbacks and a cadence long enough that only explicit triggers fetch. */
     private PollingManager createIdleTicker(Callable<FetchResult> fetchFlags) {
+        return createIdleTicker(fetchFlags, body -> Collections.emptyList());
+    }
+
+    private PollingManager createIdleTicker(
+            Callable<FetchResult> fetchFlags, Function<String, List<String>> storeFlags) {
         manager = new PollingManager(
-                fetchFlags,
-                body -> Collections.emptyList(),
+                staging(fetchFlags),
+                storeFlags,
+                this::commitStaged,
+                this::isNewerThanCommitted,
                 keys -> {},
                 () -> {},
                 reason -> {},
@@ -364,6 +394,8 @@ class PollingManagerTest {
         manager = new PollingManager(
                 () -> new FetchResult(304, null, null, null),
                 body -> Collections.emptyList(),
+                () -> {},
+                lastModified -> true,
                 keys -> {},
                 () -> {},
                 reason -> {},
@@ -469,6 +501,51 @@ class PollingManagerTest {
         Thread.sleep(500);
         assertEquals(1, fetches.get(),
                 "a deferred re-fetch should be dropped when the completed fetch is already that new");
+    }
+
+    @Test
+    @Timeout(10)
+    void deferredSseRefetchIsIssuedWhenCompletedFetchHadAnEmptyBody() throws InterruptedException {
+        assertDeferredRefetchIssuedAfterUnappliedFetch("", body -> Collections.emptyList());
+    }
+
+    @Test
+    @Timeout(10)
+    void deferredSseRefetchIsIssuedWhenCompletedFetchFailedToStore() throws InterruptedException {
+        assertDeferredRefetchIssuedAfterUnappliedFetch("{}", body -> {
+            throw new RuntimeException("bad config");
+        });
+    }
+
+    /** The completed fetch is as new as announced, but its body never applied, so the re-fetch still runs. */
+    private void assertDeferredRefetchIssuedAfterUnappliedFetch(
+            String body, Function<String, List<String>> storeFlags) throws InterruptedException {
+        String lastModifiedHeader = "Tue, 14 Nov 2023 22:13:20 GMT"; // == 1700000000
+
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger fetches = new AtomicInteger();
+
+        createIdleTicker(() -> {
+                    int n = fetches.incrementAndGet();
+                    if (n == 1) {
+                        firstStarted.countDown();
+                        release.await(5, TimeUnit.SECONDS);
+                        return new FetchResult(200, body, null, lastModifiedHeader);
+                    }
+                    return new FetchResult(304, null, null, null);
+                }, storeFlags);
+        manager.start();
+
+        manager.requestOutOfBandFetch(1_700_000_000L);
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+
+        manager.requestOutOfBandFetch(1_700_000_000L);
+        release.countDown();
+
+        Thread.sleep(500);
+        assertEquals(2, fetches.get(), "a fetch whose body never applied must not satisfy the re-fetch");
+        assertNull(committed.get(), "nothing was applied, so nothing was committed");
     }
 
     @Test
