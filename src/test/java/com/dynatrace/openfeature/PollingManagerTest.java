@@ -31,9 +31,9 @@ class PollingManagerTest {
         }
     }
 
-    // mirrors CdnFetcher: a fetch stages its result, commitFetch promotes it to applied
+    // mirrors CdnFetcher: a fetch stages its result, commitFetch commits it
     private final AtomicReference<FetchResult> staged = new AtomicReference<>();
-    private final AtomicReference<FetchResult> applied = new AtomicReference<>();
+    private final AtomicReference<FetchResult> committed = new AtomicReference<>();
 
     private Callable<FetchResult> staging(Callable<FetchResult> fetchFlags) {
         return () -> {
@@ -44,13 +44,13 @@ class PollingManagerTest {
     }
 
     private void commitStaged() {
-        applied.set(staged.get());
+        committed.set(staged.get());
     }
 
-    private boolean isNewerThanApplied(long lastModifiedEpochSeconds) {
-        FetchResult result = applied.get();
-        Long committed = result == null ? null : HttpDates.parseEpochSeconds(result.getLastModified());
-        return committed == null || lastModifiedEpochSeconds > committed;
+    private boolean isNewerThanCommitted(long lastModifiedEpochSeconds) {
+        FetchResult result = committed.get();
+        Long committedAt = result == null ? null : HttpDates.parseEpochSeconds(result.getLastModified());
+        return committedAt == null || lastModifiedEpochSeconds > committedAt;
     }
 
     private PollingManager create(
@@ -59,7 +59,7 @@ class PollingManagerTest {
             Consumer<List<String>> emitChange,
             Runnable emitSuccess,
             Consumer<String> emitFailure) {
-        manager = new PollingManager(staging(fetchFlags), storeFlags, this::commitStaged, this::isNewerThanApplied,
+        manager = new PollingManager(staging(fetchFlags), storeFlags, this::commitStaged, this::isNewerThanCommitted,
                 emitChange, emitSuccess, emitFailure, Duration.ofMillis(50));
         return manager;
     }
@@ -75,7 +75,7 @@ class PollingManagerTest {
                 staging(fetchFlags),
                 storeFlags,
                 this::commitStaged,
-                this::isNewerThanApplied,
+                this::isNewerThanCommitted,
                 keys -> {},
                 () -> {},
                 reason -> {},
@@ -545,7 +545,7 @@ class PollingManagerTest {
 
         Thread.sleep(500);
         assertEquals(2, fetches.get(), "a fetch whose body never applied must not satisfy the re-fetch");
-        assertNull(applied.get(), "nothing was applied, so nothing was committed");
+        assertNull(committed.get(), "nothing was applied, so nothing was committed");
     }
 
     @Test

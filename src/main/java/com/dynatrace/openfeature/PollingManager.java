@@ -50,7 +50,7 @@ final class PollingManager {
     private final Callable<FetchResult> fetchFlags;
     private final Function<String, List<String>> storeFlags;
     private final Runnable commitFetch;
-    private final LongPredicate isNewerThanApplied;
+    private final LongPredicate isNewerThanCommitted;
     private final Consumer<List<String>> emitChange;
     private final Runnable emitSuccess;
     private final Consumer<String> emitFailure;
@@ -83,20 +83,20 @@ final class PollingManager {
     private Long inFlightSseRefetchAt;
 
     /**
-     * @param fetchFlags      called to fetch flag configuration JSON from the CDN
-     * @param storeFlags      called to store the fetched JSON; returns changed flag keys
-     * @param commitFetch     called after a successful store to promote the fetcher's staged validators
-     * @param isNewerThanApplied whether an epoch-seconds Last-Modified is newer than the config in force
-     * @param emitChange      called with changed flag keys after a successful store
-     * @param emitSuccess     called after any successful poll (including 304 not-modified)
-     * @param emitFailure     called with a reason string when a poll fails
-     * @param initialInterval the starting poll cadence; change at runtime via {@link #setInterval}
+     * @param fetchFlags           called to fetch flag configuration JSON from the CDN
+     * @param storeFlags           called to store the fetched JSON; returns changed flag keys
+     * @param commitFetch          called after a successful store to commit the fetcher's staged validators
+     * @param isNewerThanCommitted whether an epoch-seconds Last-Modified is newer than the committed config
+     * @param emitChange           called with changed flag keys after a successful store
+     * @param emitSuccess          called after any successful poll (including 304 not-modified)
+     * @param emitFailure          called with a reason string when a poll fails
+     * @param initialInterval      the starting poll cadence; change at runtime via {@link #setInterval}
      */
     PollingManager(
             Callable<FetchResult> fetchFlags,
             Function<String, List<String>> storeFlags,
             Runnable commitFetch,
-            LongPredicate isNewerThanApplied,
+            LongPredicate isNewerThanCommitted,
             Consumer<List<String>> emitChange,
             Runnable emitSuccess,
             Consumer<String> emitFailure,
@@ -104,7 +104,7 @@ final class PollingManager {
         this.fetchFlags = fetchFlags;
         this.storeFlags = storeFlags;
         this.commitFetch = commitFetch;
-        this.isNewerThanApplied = isNewerThanApplied;
+        this.isNewerThanCommitted = isNewerThanCommitted;
         this.emitChange = emitChange;
         this.emitSuccess = emitSuccess;
         this.emitFailure = emitFailure;
@@ -136,11 +136,10 @@ final class PollingManager {
     /**
      * Requests an out-of-band fetch on behalf of SSE. Runs immediately if the fetch slot is free,
      * otherwise it is deferred and coalesced. Safe to call from any thread; does not disturb the
-     * ticker cadence.
+     * ticker cadence. A deferred re-fetch is dropped if the committed config is already at least as
+     * new as the announcement.
      *
-     * @param announcedLastModified epoch seconds from the SSE message, or null when unknown (a
-     *                              reconnect catch-up). A deferred re-fetch is dropped only when
-     *                              the completed fetch already returned a config at least this new.
+     * @param announcedLastModified epoch seconds from the SSE message, or null on reconnect catch-up
      */
     synchronized void requestOutOfBandFetch(Long announcedLastModified) {
         if (worker == null || worker.isShutdown()) {
@@ -270,8 +269,8 @@ final class PollingManager {
         long announced = pendingSseRefetchAt;
         pendingSseRefetchAt = null;
 
-        if (announced != LAST_MODIFIED_UNKNOWN && !isNewerThanApplied.test(announced)) {
-            log.debug("dropping deferred SSE re-fetch: applied config is at least as new as {}", announced);
+        if (announced != LAST_MODIFIED_UNKNOWN && !isNewerThanCommitted.test(announced)) {
+            log.debug("dropping deferred SSE re-fetch: committed config is at least as new as {}", announced);
             return;
         }
         log.debug("issuing deferred SSE re-fetch");
