@@ -5,6 +5,7 @@ on:
         branches:
             - main
     merge_group:
+    workflow_dispatch:
 
 concurrency:
     group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -22,7 +23,7 @@ jobs:
             - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
             - name: Set up JDK 17
-              uses: actions/setup-java@1d018f9b8b9b505bb578a83b230fabcce01af93b
+              uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
               with:
                   java-version: '17'
                   distribution: 'temurin'
@@ -42,7 +43,7 @@ jobs:
             - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
             - name: Set up JDK 17
-              uses: actions/setup-java@1d018f9b8b9b505bb578a83b230fabcce01af93b
+              uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
               with:
                   java-version: '17'
                   distribution: 'temurin'
