@@ -17,6 +17,7 @@ jobs:
         permissions:
             contents: write
             pull-requests: write
+            actions: write
         runs-on: ubuntu-latest
 
         steps:
@@ -24,6 +25,14 @@ jobs:
               id: release
               with:
                   token: ${{ secrets.GITHUB_TOKEN }}
+
+            # GITHUB_TOKEN pushes don't trigger CI (except workflow_dispatch), so start it for the release PR
+            - name: Run CI on release PR
+              if: ${{ steps.release.outputs.prs_created == 'true' }}
+              run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
 
         outputs:
             release_created: ${{ steps.release.outputs.release_created }}
@@ -42,7 +51,7 @@ jobs:
                   fetch-depth: 0
 
             - name: Set up JDK 17
-              uses: actions/setup-java@1d018f9b8b9b505bb578a83b230fabcce01af93b
+              uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
               with:
                   java-version: '17'
                   distribution: 'temurin'
