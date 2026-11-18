@@ -46,7 +46,7 @@
         <jackson.version>2.23.0</jackson.version>
         <junit.version>5.13.4</junit.version>
         <junit-platform-suite.version>1.13.4</junit-platform-suite.version>
-        <okhttp.version>4.12.0</okhttp.version><!-- test only; mockwebserver -->
+        <okhttp.version>5.5.1</okhttp.version><!-- test only; mockwebserver -->
         <mockito.version>5.24.0</mockito.version>
         <slf4j.version>2.0.20</slf4j.version>
         <cucumber.version>7.34.3</cucumber.version>
