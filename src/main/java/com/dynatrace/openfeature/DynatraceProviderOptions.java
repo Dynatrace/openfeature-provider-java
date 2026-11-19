@@ -219,10 +219,12 @@ public final class DynatraceProviderOptions {
         Boolean sseEnabled = null;
 
         /**
-         * Override the config origin (scheme, host, and port — no path).
+         * Override the config origin (scheme, host, and port; no path).
          * For dev/labs environments (e.g. {@code https://cdn.eu.fm.dynatracelabs.com}).
          * Production URL is derived automatically from the SDK key.
          * Falls back to {@code DT_FM_CONFIG_ORIGIN} when not set.
+         * If set, carefully consider whether {@link #metricsOrigin} should be set too; an SDK proxy
+         * or custom host typically serves both.
          */
         public Builder configOrigin(String configOrigin) {
             this.configOrigin = parseOrigin(configOrigin, "configOrigin");
