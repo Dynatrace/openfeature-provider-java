@@ -27,6 +27,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -70,6 +71,8 @@ public final class DynatraceProvider extends EventProvider {
     static final Pattern KEY_PATTERN = Pattern.compile(
             "^(dt[0-9]{2})\\.(server)_([a-z]{2,})_([a-zA-Z0-9]{10,})\\.([a-fA-F0-9]{32,})_([a-f0-9]{10,})$");
 
+    static final String ENV_SDK_KEY = "DT_FM_SDK_KEY";
+
     private static final Metadata METADATA = () -> PROVIDER_NAME;
 
     private final String cdnUrl;
@@ -104,24 +107,53 @@ public final class DynatraceProvider extends EventProvider {
     private volatile ScheduledFuture<?> graceTimer;
 
     /**
+     * Creates a provider configured entirely from env vars; the SDK key is read from
+     * {@code DT_FM_SDK_KEY}.
+     *
+     * @throws IllegalArgumentException if {@code DT_FM_SDK_KEY} is unset or malformed, or an env value is invalid
+     */
+    public DynatraceProvider() {
+        this(null, null);
+    }
+
+    /**
+     * Creates a provider from options; the SDK key is read from {@code DT_FM_SDK_KEY}.
+     *
+     * @param options optional configuration (e.g. proxy base URL override)
+     * @throws IllegalArgumentException if {@code DT_FM_SDK_KEY} is unset or malformed, or an env value is invalid
+     */
+    public DynatraceProvider(DynatraceProviderOptions options) {
+        this(null, options);
+    }
+
+    /**
      * Creates a provider from the SDK key. CDN URL is derived automatically from the key.
      *
-     * @param sdkKey SDK key in the format {@code dt{NN}.server_{geo}_{rand}.{secret}_{sha}}
-     * @throws IllegalArgumentException if the key is blank or malformed
+     * @param sdkKey SDK key in the format {@code dt{NN}.server_{geo}_{rand}.{secret}_{sha}};
+     *               if null or blank, {@code DT_FM_SDK_KEY} is used
+     * @throws IllegalArgumentException if no key is supplied or it is malformed
      */
     public DynatraceProvider(String sdkKey) {
         this(sdkKey, null);
     }
 
     /**
-     * Creates a provider from the SDK key with additional options.
+     * Creates a provider from the SDK key with additional options. Options not set in code
+     * fall back to their env vars.
      *
-     * @param sdkKey   SDK key in the format {@code dt{NN}.server_{geo}_{rand}.{secret}_{sha}}
+     * @param sdkKey   SDK key in the format {@code dt{NN}.server_{geo}_{rand}.{secret}_{sha}};
+     *                 if null or blank, {@code DT_FM_SDK_KEY} is used
      * @param options  optional configuration (e.g. proxy base URL override)
-     * @throws IllegalArgumentException if the key is blank or malformed
+     * @throws IllegalArgumentException if no key is supplied, it is malformed, or an env value is invalid
      */
     public DynatraceProvider(String sdkKey, DynatraceProviderOptions options) {
-        this(sdkKey, options, new FlagdCore(), buildDefaultHttpClient());
+        this(sdkKey, options, System::getenv);
+    }
+
+    // tests only: env lookup
+    DynatraceProvider(String sdkKey, DynatraceProviderOptions options, Function<String, String> env) {
+        this(resolveSdkKey(sdkKey, env), DynatraceProviderOptions.withEnvFallback(options, env),
+                new FlagdCore(), buildDefaultHttpClient());
     }
 
     // for testing
@@ -197,6 +229,23 @@ public final class DynatraceProvider extends EventProvider {
                 PROVIDER_NAME);
         this.providerHooks = Collections.singletonList(
                 new DynatraceMetricsHook(metricsAggregator, Clock.systemUTC(), metricsFlusher::onRecord));
+    }
+
+    private static String resolveSdkKey(String sdkKey, Function<String, String> env) {
+        if (sdkKey != null && !sdkKey.isBlank()) {
+            return sdkKey;
+        }
+        String fromEnv = DynatraceProviderOptions.readEnv(env, ENV_SDK_KEY);
+        if (fromEnv == null) {
+            throw new IllegalArgumentException(
+                    "SDK key is required; pass sdkKey or set " + ENV_SDK_KEY);
+        }
+        try {
+            validateSdkKey(fromEnv);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(ENV_SDK_KEY + ": " + e.getMessage());
+        }
+        return fromEnv;
     }
 
     static String buildCdnUrl(String sdkKey, DynatraceProviderOptions options) {
