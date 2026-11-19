@@ -540,9 +540,10 @@ class DynatraceProviderTest {
 
     @Test
     void constructorRejectsBlankKey() {
-        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider(""));
-        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider((String) null));
-        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider("   "));
+        // empty env so a real DT_FM_SDK_KEY can't supply the key
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider("", null, name -> null));
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider(null, null, name -> null));
+        assertThrows(IllegalArgumentException.class, () -> new DynatraceProvider("   ", null, name -> null));
     }
 
     @Test

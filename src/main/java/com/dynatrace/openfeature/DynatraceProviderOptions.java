@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.Locale;
+import java.util.function.Function;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,12 +33,17 @@ public final class DynatraceProviderOptions {
      */
     static final int DEFAULT_METRICS_HARD_CAP_DISTINCT_FLAGS = 2_000;
 
+    static final String ENV_CONFIG_ORIGIN = "DT_FM_CONFIG_ORIGIN";
+    static final String ENV_METRICS_ORIGIN = "DT_FM_METRICS_ORIGIN";
+    static final String ENV_SSE_DISABLED = "DT_FM_SSE_DISABLED";
+
     private final URI configOrigin;
     private final String metricsUrl;
     private final Duration metricsFlushInterval;
     private final int metricsSoftCapDistinctFlags;
     private final int metricsHardCapDistinctFlags;
-    private final boolean sseEnabled;
+    // null means not set in code; defers to the env var, then the default
+    private final Boolean sseEnabled;
 
     private DynatraceProviderOptions(Builder builder) {
         this.configOrigin = builder.configOrigin;
@@ -79,7 +85,57 @@ public final class DynatraceProviderOptions {
     }
 
     public boolean isSseEnabled() {
-        return sseEnabled;
+        return sseEnabled == null || sseEnabled;
+    }
+
+    /**
+     * Returns {@code options} with each option not set in code filled from its env var.
+     * Env values are validated like code values.
+     *
+     * @throws IllegalArgumentException if an env value is invalid
+     */
+    static DynatraceProviderOptions withEnvFallback(DynatraceProviderOptions options, Function<String, String> env) {
+        Builder b = new Builder();
+        if (options != null) {
+            b.configOrigin = options.configOrigin;
+            b.metricsUrl = options.metricsUrl;
+            b.metricsFlushInterval = options.metricsFlushInterval;
+            b.sseEnabled = options.sseEnabled;
+        }
+        String configOrigin = readEnv(env, ENV_CONFIG_ORIGIN);
+        if (b.configOrigin == null && configOrigin != null) {
+            b.configOrigin = parseOrigin(configOrigin, ENV_CONFIG_ORIGIN);
+        }
+        String metricsOrigin = readEnv(env, ENV_METRICS_ORIGIN);
+        if (b.metricsUrl == null && metricsOrigin != null) {
+            b.metricsUrl = toMetricsUrl(parseOrigin(metricsOrigin, ENV_METRICS_ORIGIN));
+        }
+        String sseDisabled = readEnv(env, ENV_SSE_DISABLED);
+        if (b.sseEnabled == null && sseDisabled != null) {
+            b.sseEnabled = !parseBoolean(sseDisabled, ENV_SSE_DISABLED);
+        }
+        return b.build();
+    }
+
+    /** Returns the stripped value of {@code name}, or null if unset or blank. */
+    static String readEnv(Function<String, String> env, String name) {
+        String value = env.apply(name);
+        return value == null || value.isBlank() ? null : value.strip();
+    }
+
+    private static boolean parseBoolean(String value, String fieldName) {
+        if (value.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (value.equalsIgnoreCase("false")) {
+            return false;
+        }
+        throw new IllegalArgumentException(
+                fieldName + " must be true or false; got: \"" + value + "\"");
+    }
+
+    private static String toMetricsUrl(URI origin) {
+        return origin.toString() + "/v1/metrics";
     }
 
     public static Builder builder() {
@@ -160,12 +216,13 @@ public final class DynatraceProviderOptions {
         URI configOrigin = null;
         String metricsUrl = null;
         Duration metricsFlushInterval = DEFAULT_METRICS_FLUSH_INTERVAL;
-        boolean sseEnabled = true;
+        Boolean sseEnabled = null;
 
         /**
          * Override the config origin (scheme, host, and port — no path).
          * For dev/labs environments (e.g. {@code https://cdn.eu.fm.dynatracelabs.com}).
          * Production URL is derived automatically from the SDK key.
+         * Falls back to {@code DT_FM_CONFIG_ORIGIN} when not set.
          */
         public Builder configOrigin(String configOrigin) {
             this.configOrigin = parseOrigin(configOrigin, "configOrigin");
@@ -177,10 +234,10 @@ public final class DynatraceProviderOptions {
          * The provider appends {@code /v1/metrics}. For dev/labs environments
          * (e.g. {@code https://metrics.eu.fm.dynatracelabs.com}).
          * Production URL is derived automatically from the SDK key.
+         * Falls back to {@code DT_FM_METRICS_ORIGIN} when not set.
          */
         public Builder metricsOrigin(String metricsOrigin) {
-            URI uri = parseOrigin(metricsOrigin, "metricsOrigin");
-            this.metricsUrl = uri.toString() + "/v1/metrics";
+            this.metricsUrl = toMetricsUrl(parseOrigin(metricsOrigin, "metricsOrigin"));
             return this;
         }
 
@@ -195,7 +252,10 @@ public final class DynatraceProviderOptions {
             return this;
         }
 
-        /** Disables SSE; provider will poll only. Polling interval stays 10s. */
+        /**
+         * Disables SSE; provider will poll only. Polling interval stays 10s.
+         * When not called, {@code DT_FM_SSE_DISABLED} decides.
+         */
         public Builder disableSse() {
             this.sseEnabled = false;
             return this;

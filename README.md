@@ -59,6 +59,26 @@ api.setProviderAndWait(new DynatraceProvider(sdkKey, options));
 | `configOrigin(String)` | `String` | derived from SDK key | Override the flag configuration origin. |
 | `metricsOrigin(String)` | `String` | derived from SDK key | Override the evaluation metrics ingest origin. |
 
+### Environment variables
+
+Each option can also be set from an environment variable. A value set in code wins over the
+environment variable, which wins over the default. Empty values count as unset.
+
+| Environment variable | Equivalent | Format |
+| --- | --- | --- |
+| `DT_FM_SDK_KEY` | `sdkKey` constructor argument | SDK key |
+| `DT_FM_CONFIG_ORIGIN` | `configOrigin(String)` | URL origin |
+| `DT_FM_METRICS_ORIGIN` | `metricsOrigin(String)` | URL origin |
+| `DT_FM_SSE_DISABLED` | `disableSse()` | `true` / `false` |
+
+> **Note:** if `configOrigin` is set, carefully consider whether `metricsOrigin` should be set too; an SDK proxy or custom host typically serves both.
+
+With `DT_FM_SDK_KEY` set, the key can be omitted:
+
+```java
+api.setProviderAndWait(new DynatraceProvider());
+```
+
 A runnable example lives in [`examples/local-demo`](examples/local-demo).
 
 ## Contributing
