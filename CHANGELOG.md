@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.1-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.6.0-alpha...v0.6.1-alpha) (2026-11-24)
+
+
+### ✨ New Features
+
+* read provider config from environment variables (ref: AI-1638) ([#63](https://github.com/Dynatrace/openfeature-provider-java/issues/63)) ([d8725d8](https://github.com/Dynatrace/openfeature-provider-java/commit/d8725d87d83b5d1c5178675fde5a3c2ee2388f52))
+
+
+### 🐛 Bug Fixes
+
+* commit CDN validators only after the config applies ([#49](https://github.com/Dynatrace/openfeature-provider-java/issues/49)) ([6dc2826](https://github.com/Dynatrace/openfeature-provider-java/commit/6dc2826359ef9983f8d46de4002835c2332c6d62))
+* **deps:** bump the minor-and-patch group with 11 updates ([#55](https://github.com/Dynatrace/openfeature-provider-java/issues/55)) ([07f40d0](https://github.com/Dynatrace/openfeature-provider-java/commit/07f40d009581f22b84a8042d3dda08027fdc94a1))
+* e2e background steps adjustments ([#64](https://github.com/Dynatrace/openfeature-provider-java/issues/64)) ([95dfd2a](https://github.com/Dynatrace/openfeature-provider-java/commit/95dfd2a22a7a005a24844515dd7d3f5f863e800c))
+
+
+### 🧹 Chore
+
+* **deps:** bump the local-demo-minor-and-patch group in /examples/local-demo with 2 updates ([#52](https://github.com/Dynatrace/openfeature-provider-java/issues/52)) ([b39cd91](https://github.com/Dynatrace/openfeature-provider-java/commit/b39cd91f1c4adeb8f8d45514fe6fdb881860941e))
+* fix ci dead-end if no releases ([#60](https://github.com/Dynatrace/openfeature-provider-java/issues/60)) ([4541985](https://github.com/Dynatrace/openfeature-provider-java/commit/4541985a0c3fb5cf2435cf3903076e71ee92d0a6))
+
 ## [0.6.0-alpha](https://github.com/Dynatrace/openfeature-provider-java/compare/v0.5.0-alpha...v0.6.0-alpha) (2026-11-05)
 
 
