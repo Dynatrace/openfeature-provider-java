@@ -153,12 +153,14 @@ public class E2eStepDefinitions {
 
     @Given("a mock server is running")
     public void aMockServerIsRunning() {
-        useMockServer(false);
-    }
-
-    @Given("a mock server with SSE enabled is running")
-    public void aMockServerWithSseEnabledIsRunning() {
-        useMockServer(true);
+        if (mockServer == null) {
+            mockServer = MockServer.get();
+        }
+        optionsBuilder = DynatraceProviderOptions.builder()
+                .configOrigin(mockServer.origin())
+                .metricsOrigin(mockServer.origin())
+                .metricsFlushInterval(Duration.ofHours(1)); // no periodic metrics flush during a scenario
+        sseEnabled = true;
     }
 
     @Given("the SDK key {string}")
@@ -595,20 +597,6 @@ public class E2eStepDefinitions {
         assertTrue(Math.abs(measuredMs - expected) <= CADENCE_TOLERANCE.toMillis(),
                 what + " was " + measuredMs + "ms, expected " + expected + "ms +/- "
                         + CADENCE_TOLERANCE.toMillis() + "ms");
-    }
-
-    private void useMockServer(boolean sseEnabled) {
-        if (mockServer == null) {
-            mockServer = MockServer.get();
-        }
-        optionsBuilder = DynatraceProviderOptions.builder()
-                .configOrigin(mockServer.origin())
-                .metricsOrigin(mockServer.origin())
-                .metricsFlushInterval(Duration.ofHours(1)); // no periodic metrics flush during a scenario
-        this.sseEnabled = sseEnabled;
-        if (!sseEnabled) {
-            optionsBuilder.disableSse();
-        }
     }
 
     /**
